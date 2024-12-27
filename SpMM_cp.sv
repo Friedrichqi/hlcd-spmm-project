@@ -153,61 +153,59 @@ module SpMM(
     output  int                 num_el
 );
     assign num_el = `N;
-    logic [$clog2(`N):0] processing_counter;  // Counter for processing time
-    logic processing_done;                    // Flag for processing completion
-    int pe_delay;                            // Store PE delay
+
+    //Definations
+
+    // Input Part
+    data_t rhs_buffer [`N-1:0][`N-1:0]; // RHS buffer - stores full NxN matrix
+    data_t rhs_trans [`N-1:0][`N-1:0]; // RHS transposed
+    logic [$clog2(`N/4)-1:0] rhs_block_counter; // Counter for blocks of 4 rows during RHS loading progress
+    logic rhs_loading_done; // Signal for lhs loading
     
-    // State definitions
-    typedef enum logic [2:0] {
+    // Output Part
+    logic [$clog2(`N/4)-1:0] output_counter; // Counter for blocks of 4 rows during output progress
+    logic output_done; // Signal for output done
+    
+    //Processing Part
+    logic [$clog2(`N):0] processing_counter; // Counter for processing time, deciding when to output
+    logic processing_done; // Signal for output ready
+    int pe_delay;
+    data_t pe_outputs [`N-1:0][`N-1:0]; // PE Output buffers
+
+    
+
+
+    //State Machine
+    typedef enum logic [1:0] {
         IDLE,
         LOADING_RHS,
         PROCESSING,
         OUTPUT
     } state_t;
-    
     state_t current_state, next_state;
-    
-    // RHS buffer - stores full NxN matrix
-    data_t rhs_buffer [`N-1:0][`N-1:0];
-    
-    // Counter for blocks of 4 rows during RHS loading progress
-    logic [$clog2(`N/4)-1:0] rhs_block_counter;
-    logic rhs_loading_done;
-    
-    // Column vectors for PEs - each column from rhs_buffer becomes a vector
-    data_t rhs_trans [`N-1:0][`N-1:0];  // [PE_number][row_number]
 
-    // PE Output buffers
-    data_t pe_outputs [`N-1:0][`N-1:0];   // [PE_number][output_element]
-    
-    // State machine
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
             current_state <= IDLE;
-            rhs_block_counter <= '0;
-            rhs_loading_done <= 1'b0;
-            processing_counter <= '0;
-            processing_done <= 1'b0;
-        end else begin
-            current_state <= next_state;
-        end
+            rhs_block_counter <= 0;
+            rhs_loading_done <= 0;
+            processing_counter <= 0;
+            processing_done <= 0;
+            out_ready = 0;
+            output_counter <= 0;
+        end else current_state <= next_state;
     end
     
     always_ff @(posedge clock) begin
-        if (reset) begin
-            processing_counter <= '0;
-            processing_done <= 1'b0;
-        end else if (current_state == PROCESSING) begin
-            processing_counter <= processing_counter + 1;
-            if (processing_counter == (`N + pe_delay))
-                processing_done <= 1'b1;
-                //processing_counter <= '0;
+        if (current_state == PROCESSING) begin  
+            if (processing_counter < (`N + pe_delay)) 
+                processing_counter <= processing_counter + 1;
+            else processing_done <= 1'b1;
         end else begin
             processing_counter <= '0;
             processing_done <= 1'b0;
         end
     end
-
 
     // Next state logic
     always_comb begin
@@ -222,46 +220,40 @@ module SpMM(
                     next_state = PROCESSING;
             end
             PROCESSING: begin
-                if (processing_done) begin
+                if (processing_done)
+                    next_state = OUTPUT;
+            end
+            OUTPUT: begin
+                out_ready = 1'b1;
+                if (output_done)
                     next_state = IDLE;
-                    out_ready = 1'b1;
-                end
             end
         endcase
     end
 
+
+
+
     // RHS Buffer Loading Logic
     always_ff @(posedge clock) begin
-        if (reset) begin
-            rhs_block_counter <= '0;
-            rhs_loading_done <= 1'b0;
-        end else if (current_state == IDLE) begin
+        if (current_state != LOADING_RHS) begin
             rhs_loading_done <= 1'b0;
             rhs_block_counter <= '0;
-        end else if (current_state == LOADING_RHS) begin
+        end else begin
             // Load 4 rows at a time
-            for (int i = 0; i < 4; i++) begin
-                for (int j = 0; j < `N; j++) begin
+            for (int i = 0; i < 4; i++)
+                for (int j = 0; j < `N; j++)
                     rhs_buffer[rhs_block_counter * 4 + i][j] <= rhs_data[i][j];
-                end
-            end
             
             // Update counter
-            rhs_block_counter <= rhs_block_counter + 1;
-            if (rhs_block_counter == (`N/4) - 1) begin
+            if (rhs_block_counter < (`N/4) - 1) rhs_block_counter <= rhs_block_counter + 1;
+            else begin
                 rhs_loading_done <= 1'b1;
-                rhs_block_counter <= '0;
+                for (int i = 0; i < `N; i++)
+                    for (int j = 0; j < `N; j++)
+                        rhs_trans[i][j] <= rhs_buffer[j][i];
             end
         end 
-    end
-
-    // Transpose the matrix to get columns
-    always_ff @(posedge clock) begin
-        if (current_state == LOADING_RHS && rhs_loading_done) begin
-            for (int i = 0; i < `N; i++)
-                for (int j = 0; j < `N; j++)
-                    rhs_trans[i][j] <= rhs_buffer[j][i];
-        end
     end
 
     // PE array instantiation - N PEs, each processing one column
@@ -283,23 +275,19 @@ module SpMM(
         end
     endgenerate
 
-    logic [$clog2(`N/4)-1:0] output_counter;
+    //Output Buffer Logic
     always_ff @(posedge clock or posedge reset or posedge out_ready) begin
-        if (reset) begin
+        if (current_state != OUTPUT) begin
             out_ready = 0;
+            output_done = 0;
             output_counter <= 0;
-        end
-        if (out_ready) begin
-            for (int block = 0; block < 4; block++) begin
-                for (int col = 0; col < `N; col++) begin
+        end else begin
+            for (int block = 0; block < 4; block++)
+                for (int col = 0; col < `N; col++)
                     assign out_data[block][col] = pe_outputs[col][4 * output_counter + block];
-                end
-            end
-            output_counter <= output_counter + 1;
-            if (output_counter == (`N/4) - 1) begin
-                out_ready = 0;
-                output_counter <= 0;
-            end
+
+            if (output_counter < (`N/4) - 1) output_counter <= output_counter + 1;
+            else output_done = 1'b1;
         end
     end
 
