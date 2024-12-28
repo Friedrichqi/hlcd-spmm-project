@@ -37,7 +37,9 @@ module RedUnit(
     input   logic [`lgN-1:0]    out_idx[`N-1:0],
     output  data_t              out_data[`N-1:0],
     output  int                 delay,
-    output  int                 num_el
+    output  int                 num_el,
+    output  data_t              halo_out,
+    input   data_t              halo_in
 );
     // num_el 总是赋值为 N
     assign num_el = `N;
@@ -46,7 +48,7 @@ module RedUnit(
 
     data_t psum[`N-1:0];
     generate
-        assign psum[0] = data[0];
+        assign psum[0] = data[0] + halo_in;
         for(genvar i = 1; i < `N; i++) begin
             assign psum[i] = split[i-1] ? data[i] : psum[i-1] + data[i];
         end
@@ -54,6 +56,18 @@ module RedUnit(
             assign out_data[i] = psum[out_idx[i]];
         end
     endgenerate
+
+    logic [`lgN-1:0] last_split;
+    always_comb begin
+        last_split = '{default: 0};
+        halo_out = 0;
+        for (int i = `N - 1; i >= 0; --i)
+            if (split[i]) begin
+                last_split = i;
+                break;
+            end
+        halo_out = last_split == `N-1 ? 0 : psum[`N-1];
+    end
 endmodule
 
 module PE(
@@ -72,22 +86,19 @@ module PE(
     assign num_el = `N;
 
     //State Machine
-    logic valid;
-    always_ff @(posedge clock or posedge reset) begin
-        if (reset) valid <= 0;
-        else valid <= lhs_start || valid;
-    end
+    logic valid = 0;
+    assign valid = lhs_start || valid;
 
 
     // split 用于记录 lhs_ptr 的变化
     logic split[`N-1:0];
-    logic [`lgN-1:0] current_pos_ptr;
-    logic [`lgN-1:0] current_row_data;
-    logic [`lgN-1:0] current_row_output;
+    logic [`lgN:0] current_pos_ptr;
+    logic [`lgN:0] current_row_data;
+    logic [`lgN:0] current_row_output;
     logic [`lgN-1:0] out_idx[`N-1:0];
     // current_row_data 记录当前data的部分和求到哪一行了
     // current_row_output 记录当前out_idx输出到哪一行了
-    always_ff @(posedge clock or posedge reset or posedge valid) begin
+    always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
             split = '{default: 0};
             current_pos_ptr = 0;
@@ -95,6 +106,7 @@ module PE(
             current_row_output = 0;
             out_idx = '{default: 0};
         end else if (valid) begin
+            split = '{default: 0};
             for (int i = 0; i < `N; ++i) begin
                 if (lhs_ptr[current_pos_ptr] >= current_row_data * `N &&
                 lhs_ptr[current_pos_ptr] < (current_row_data + 1) * `N) begin
@@ -106,7 +118,6 @@ module PE(
             current_row_data++;
         end
     end
-
 
     // mult_result 用于记录乘法结果
     data_t mult_result[`N-1:0];
@@ -122,16 +133,38 @@ module PE(
     endgenerate
 
     int red_delay;
+    data_t out_buffer[`N-1:0];
+    data_t halo_in, halo_out;
+    // Question: why negedge clock?
+    always_ff @(negedge clock or posedge reset) begin
+        if (reset) halo_in <= 0;
+        else if (valid) halo_in <= halo_out;
+    end
+
+
     RedUnit red_unit(
         .clock(clock),
         .reset(reset),
         .data(mult_result),
         .split(split),
         .out_idx(out_idx),
-        .out_data(out),
+        .out_data(out_buffer),
         .delay(red_delay),
-        .num_el(num_el)
+        .num_el(num_el),
+        .halo_out(halo_out),
+        .halo_in(halo_in)
     );
+
+    logic zero[`N-1:0];
+    always_comb begin
+        out = '{default: 0};
+        zero = '{default: 0};
+        for (int i = 1; i < `N; ++i)
+            if (lhs_ptr[i] == lhs_ptr[i - 1])
+                zero[i] = 1;
+        for (int i = 0; i < current_row_output; i++)
+            if (!zero[i]) out[i] = out_buffer[i];
+    end
     assign delay = red_delay;
 endmodule
 
