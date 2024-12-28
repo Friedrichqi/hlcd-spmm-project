@@ -71,35 +71,39 @@ module PE(
     // num_el 总是赋值为 N
     assign num_el = `N;
 
+    //State Machine
     logic valid;
-    always_ff @(posedge clock) begin
-        if (reset)
-            valid <= 1'b0;
-        else
-            valid <= lhs_start || valid;
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) valid <= 0;
+        else valid <= lhs_start || valid;
     end
 
 
     // split 用于记录 lhs_ptr 的变化
     logic split[`N-1:0];
-    logic [`lgN-1:0] current_pos_ptr = '{default: 0};
-    logic [`lgN-1:0] out_idx[`N-1:0] = '{default: 0};
-    logic [`lgN-1:0] current_row = '{default: 0};
-    // current_row 记录当前部分和求到哪一行了
-    always_ff @(posedge clock) begin
+    logic [`lgN-1:0] current_pos_ptr;
+    logic [`lgN-1:0] current_row_data;
+    logic [`lgN-1:0] current_row_output;
+    logic [`lgN-1:0] out_idx[`N-1:0];
+    // current_row_data 记录当前data的部分和求到哪一行了
+    // current_row_output 记录当前out_idx输出到哪一行了
+    always_ff @(posedge clock or posedge reset or posedge valid) begin
         if (reset) begin
             split = '{default: 0};
-            current_pos_ptr = '{default: 0};
-            current_row = '{default: 0};
+            current_pos_ptr = 0;
+            current_row_data = 0;
+            current_row_output = 0;
+            out_idx = '{default: 0};
         end else if (valid) begin
-            for(int i = current_pos_ptr; i < `N; i++) begin
-                if (lhs_ptr[i] - lhs_ptr[current_pos_ptr] >= `N) begin
-                    current_pos_ptr = i - 1;
-                    break;
+            for (int i = 0; i < `N; ++i) begin
+                if (lhs_ptr[current_pos_ptr] >= current_row_data * `N &&
+                lhs_ptr[current_pos_ptr] < (current_row_data + 1) * `N) begin
+                    split[lhs_ptr[current_pos_ptr] % `N] = 1;
+                    out_idx[current_row_output++] = lhs_ptr[current_pos_ptr] % `N;
+                    current_pos_ptr++;
                 end
-                split[lhs_ptr[i] % `N] = 1;
-                out_idx[current_row++] = lhs_ptr[i] % `N;
             end
+            current_row_data++;
         end
     end
 
@@ -128,7 +132,7 @@ module PE(
         .delay(red_delay),
         .num_el(num_el)
     );
-    assign delay = 1 + red_delay;
+    assign delay = red_delay;
 endmodule
 
 module SpMM(
@@ -195,17 +199,6 @@ module SpMM(
             output_counter <= 0;
         end else current_state <= next_state;
     end
-    
-    always_ff @(posedge clock) begin
-        if (current_state == PROCESSING) begin  
-            if (processing_counter < (`N + pe_delay)) 
-                processing_counter <= processing_counter + 1;
-            else processing_done <= 1'b1;
-        end else begin
-            processing_counter <= '0;
-            processing_done <= 1'b0;
-        end
-    end
 
     // Next state logic
     always_comb begin
@@ -224,7 +217,7 @@ module SpMM(
                     next_state = OUTPUT;
             end
             OUTPUT: begin
-                out_ready = 1'b1;
+                out_ready = 1;
                 if (output_done)
                     next_state = IDLE;
             end
@@ -232,27 +225,20 @@ module SpMM(
     end
 
 
-
-
     // RHS Buffer Loading Logic
     always_ff @(posedge clock) begin
         if (current_state != LOADING_RHS) begin
-            rhs_loading_done <= 1'b0;
-            rhs_block_counter <= '0;
+            rhs_loading_done <= 0;
+            rhs_block_counter <= 0;
         end else begin
             // Load 4 rows at a time
             for (int i = 0; i < 4; i++)
                 for (int j = 0; j < `N; j++)
-                    rhs_buffer[rhs_block_counter * 4 + i][j] <= rhs_data[i][j];
+                    rhs_buffer[j][rhs_block_counter * 4 + i] <= rhs_data[i][j];
             
             // Update counter
             if (rhs_block_counter < (`N/4) - 1) rhs_block_counter <= rhs_block_counter + 1;
-            else begin
-                rhs_loading_done <= 1'b1;
-                for (int i = 0; i < `N; i++)
-                    for (int j = 0; j < `N; j++)
-                        rhs_trans[i][j] <= rhs_buffer[j][i];
-            end
+            else rhs_loading_done <= 1;
         end 
     end
 
@@ -267,13 +253,25 @@ module SpMM(
                 .lhs_ptr(lhs_ptr),
                 .lhs_col(lhs_col),
                 .lhs_data(lhs_data),
-                .rhs(rhs_trans[i]),
+                .rhs(rhs_buffer[i]),
                 .out(pe_outputs[i]),
                 .delay(pe_delay),
                 .num_el()
             );
         end
     endgenerate
+
+    always_ff @(posedge clock) begin
+        if (current_state != PROCESSING) begin  
+            processing_counter <= 0;
+            processing_done <= 0;
+        end else begin
+            if (processing_counter < (`N + pe_delay)) 
+                processing_counter <= processing_counter + 1;
+            else processing_done <= 1;
+        end
+    end
+
 
     //Output Buffer Logic
     always_ff @(posedge clock or posedge reset or posedge out_ready) begin
@@ -287,7 +285,7 @@ module SpMM(
                     assign out_data[block][col] = pe_outputs[col][4 * output_counter + block];
 
             if (output_counter < (`N/4) - 1) output_counter <= output_counter + 1;
-            else output_done = 1'b1;
+            else output_done = 1;
         end
     end
 
@@ -296,8 +294,8 @@ module SpMM(
     assign lhs_ready_ns = (current_state == PROCESSING);
 
     // Not implemented yet
-    assign lhs_ready_ws = 1'b0;
-    assign lhs_ready_os = 1'b0;
-    assign lhs_ready_wos = 1'b0;
+    assign lhs_ready_ws = 0;
+    assign lhs_ready_os = 0;
+    assign lhs_ready_wos = 0;
 
 endmodule
