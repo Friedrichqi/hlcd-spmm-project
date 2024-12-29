@@ -303,7 +303,7 @@ module SpMM(
             if (processing_counter < (`N + pe_delay)) begin
                 processing_counter <= processing_counter + 1;
                 for (int i = 0; i < `N; ++i)
-                    out_buffer[processing_counter-1][i] = pe_outputs[i][processing_counter-1];
+                    out_buffer[processing_counter-pe_delay][i] = pe_outputs[i][processing_counter-pe_delay];
             end else processing_done <= 1;
         end
     end
@@ -313,7 +313,7 @@ module SpMM(
     always_ff @(posedge clock or posedge reset or posedge out_ready) begin
         if (current_state != OUTPUT) begin
             out_ready = 0;
-            output_done = 0;
+            output_done <= 0;
             output_counter <= 0;
         end else begin
             for (int block = 0; block < 4; block++)
@@ -321,7 +321,7 @@ module SpMM(
                     assign out_data[block][col] = out_buffer[block][col];
 
             if (output_counter < (`N/4) - 1) output_counter <= output_counter + 1;
-            else output_done = 1;
+            else output_done <= 1;
         end
     end
 
