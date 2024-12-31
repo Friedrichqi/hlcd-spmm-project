@@ -195,7 +195,6 @@ module SpMM(
 
     // Input Part
     data_t rhs_buffer [`N-1:0][`N-1:0]; // RHS buffer - stores full NxN matrix
-    data_t rhs_trans [`N-1:0][`N-1:0]; // RHS transposed
     logic [$clog2(`N/4)-1:0] rhs_block_counter; // Counter for blocks of 4 rows during RHS loading progress
     logic rhs_loading_done; // Signal for lhs loading
     

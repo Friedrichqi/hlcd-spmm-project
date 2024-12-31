@@ -202,6 +202,7 @@ module SpMM(
     // Output Part
     logic [$clog2(`N/4)-1:0] output_counter; // Counter for blocks of 4 rows during output progress
     logic output_done; // Signal for output done
+    data_t out_buffer [`N-1:0][`N-1:0]; // Output buffer
     
     //Processing Part
     logic [$clog2(`N):0] processing_counter; // Counter for processing time, deciding when to output
@@ -299,9 +300,11 @@ module SpMM(
             processing_counter <= 0;
             processing_done <= 0;
         end else begin
-            if (processing_counter < (`N + pe_delay)) 
+            if (processing_counter < (`N + pe_delay)) begin
                 processing_counter <= processing_counter + 1;
-            else processing_done <= 1;
+                for (int i = 0; i < `N; ++i)
+                    out_buffer[processing_counter-pe_delay][i] = pe_outputs[i][processing_counter-pe_delay];
+            end else processing_done <= 1;
         end
     end
 
@@ -310,15 +313,15 @@ module SpMM(
     always_ff @(posedge clock or posedge reset or posedge out_ready) begin
         if (current_state != OUTPUT) begin
             out_ready = 0;
-            output_done = 0;
+            output_done <= 0;
             output_counter <= 0;
         end else begin
             for (int block = 0; block < 4; block++)
                 for (int col = 0; col < `N; col++)
-                    assign out_data[block][col] = pe_outputs[col][4 * output_counter + block];
+                    assign out_data[block][col] = out_buffer[block][col];
 
             if (output_counter < (`N/4) - 1) output_counter <= output_counter + 1;
-            else output_done = 1;
+            else output_done <= 1;
         end
     end
 

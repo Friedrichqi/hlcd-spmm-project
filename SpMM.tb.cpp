@@ -651,8 +651,8 @@ int main() {
     generate_gtkw_file("trace/SpMM/wave.gtkw", num_el);
     std::vector<Test*> tests {
         new NsOnepass(),
-        // new RhsDbBuf(),
-        // new OutDbBuf(),
+        new RhsDbBuf(),
+        new OutDbBuf(),
         // new RhsOutDbBuf(),
         // new WSOnePass(),
         // new WSOutDbBuf(),
