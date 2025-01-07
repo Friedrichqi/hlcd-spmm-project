@@ -70,6 +70,100 @@ module RedUnit(
     end
 endmodule
 
+module RedUnit_FAN(
+    input   logic               clock,
+                                reset,
+    input   data_t              data[`N-1:0],
+    input   logic               split[`N-1:0],
+    input   logic [`lgN-1:0]    out_idx[`N-1:0],
+    output  data_t              out_data[`N-1:0],
+    output  int                 delay,
+    output  int                 num_el
+);
+    localparam NUM_LEVELS = $clog2(`N);
+    
+    // Register arrays for partial sums and intermediate results from each level of the FAN network
+    data_t fan_level[NUM_LEVELS:0][`N-1:0];
+    logic valid_level[NUM_LEVELS:0][`N-1:0];
+    
+    // First level initialization - copy input data
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            for (int i = 0; i < `N; i++) begin
+                fan_level[0][i] <= '0;
+                valid_level[0][i] <= '0;
+            end
+        end else begin
+            for (int i = 0; i < `N; i++) begin
+                fan_level[0][i] <= data[i];
+                valid_level[0][i] <= 1'b1;
+            end
+        end
+    end
+
+    // Generate the FAN network levels
+    genvar level, idx;
+    generate
+        for (level = 0; level < NUM_LEVELS; level++) begin : fan_levels
+            localparam LEVEL_WIDTH = `N >> level;
+            
+            for (idx = 0; idx < LEVEL_WIDTH-1; idx += 2) begin : level_units
+                // Determine if we should add these elements based on split signal
+                wire should_add = !split[idx] && valid_level[level][idx] && valid_level[level][idx+1];
+                
+                always_ff @(posedge clock or posedge reset) begin
+                    if (reset) begin
+                        fan_level[level+1][idx/2] <= '0;
+                        valid_level[level+1][idx/2] <= '0;
+                    end else begin
+                        if (should_add) begin
+                            // Add elements if they belong to the same group
+                            //fan_level[level+1][idx/2] <= fan_level[level][idx] + fan_level[level][idx+1];
+                            add_(.clock(clock), .a(fan_level[level][idx]), .b(fan_level[level][idx+1]), .out(fan_level[level+1][idx/2]));
+                            
+                            valid_level[level+1][idx/2] <= 1'b1;
+                        end else begin
+                            // Forward the element based on split signal
+                            fan_level[level+1][idx/2] <= fan_level[level][idx];
+                            valid_level[level+1][idx/2] <= valid_level[level][idx];
+                        end
+                    end
+                end
+                
+                // Implement forwarding paths for flexible routing
+                always_ff @(posedge clock or posedge reset) begin
+                    if (reset) begin
+                        fan_level[level+1][idx/2 + 1] <= '0;
+                        valid_level[level+1][idx/2 + 1] <= '0;
+                    end else if (split[idx]) begin
+                        fan_level[level+1][idx/2 + 1] <= fan_level[level][idx+1];
+                        valid_level[level+1][idx/2 + 1] <= valid_level[level][idx+1];
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // Output routing based on out_idx
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            for (int i = 0; i < `N; i++) begin
+                out_data[i] <= '0;
+            end
+        end else begin
+            for (int i = 0; i < `N; i++) begin
+                out_data[out_idx[i]] <= fan_level[NUM_LEVELS-1][i];
+            end
+        end
+    end
+
+    // Set constant parameters
+    assign num_el = `N;
+    // Delay is NUM_LEVELS + 1 (input register) + 1 (output register)
+    assign delay = NUM_LEVELS + 2;
+
+endmodule
+
 module PE(
     input   logic               clock,
                                 reset,
