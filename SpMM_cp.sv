@@ -29,7 +29,7 @@ module mul_(
     end
 endmodule
 
-module RedUnit(
+module RedUnit1(
     input   logic               clock,
                                 reset,
     input   data_t              data[`N-1:0],
@@ -70,7 +70,7 @@ module RedUnit(
     end
 endmodule
 
-module RedUnit1(
+module RedUnit(
     input   logic               clock,
                                 reset,
     input   data_t              data[`N-1:0],
@@ -78,100 +78,142 @@ module RedUnit1(
     input   logic [`lgN-1:0]    out_idx[`N-1:0],
     output  data_t              out_data[`N-1:0],
     output  int                 delay,
-    output  int                 num_el
+    output  int                 num_el,
 );
     localparam NUM_LEVELS = $clog2(`N);
-
-    // Each level's input and output registers
-    data_t level_data[NUM_LEVELS:0][`N-1:0];
-    logic [`lgN-1:0] level_vecID[NUM_LEVELS:0][`N-1:0];
-    logic [`lgN-1:0] level_outidx[NUM_LEVELS:0][`N-1:0];
-
-    // Calculate vector IDs based on split signal
-    logic [`lgN-1:0] vecID[`N-1:0];
-    always_comb begin
-        vecID[0] = '0;
-        for (int i = 1; i < `N; i++) begin
-            vecID[i] = split[i-1] ? vecID[i-1] + 1 : vecID[i-1];
-        end
-    end
-
-    // Input registration - Level 0
+    logic [NUM_LEVELS:0] vecID [NUM_LEVELS:0][`N-1:0];
+    int adderLvl [NUM_LEVELS:0][`N-1:0];
+    logic add_En[NUM_LEVELS:0][`N-1:0];
+    logic bypass_En[NUM_LEVELS:0][`N-1:0];
+    logic [$clog2(`N)-1:0] left_sel[NUM_LEVELS:0][`N-1:0];
+    logic [$clog2(`N)-1:0] right_sel[NUM_LEVELS:0][`N-1:0];
+    logic [NUM_LEVELS:0] latest_out_idx[NUM_LEVELS:0][`N-1:0];
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
-            level_data[0] <= '{default: '0};
-            level_vecID[0] <= '{default: '0};
-            level_outidx[0] <= '{default: '0};
+            for (int i = 0; i < `N; i++) begin
+                vecID[0][i] = 0;
+                add_En[0][i] = 0;
+                bypass_En[0][i] = 0;
+                adderLvl[0][i] = 0;
+                left_sel[0][i] = 0;
+                right_sel[0][i] = 0;
+            end
         end else begin
-            level_data[0] <= data;
-            level_vecID[0] <= vecID;
-            level_outidx[0] <= out_idx;
+            for (int i = 1; i < `N; i++) vecID[0][i] = split[i - 1] ? vecID[0][i - 1] + 1 : vecID[0][i - 1];
+            
+            for (int i = 0; i < `N; i++) adderLvl[0][i] = 0;
+            for (int i = 0; i < NUM_LEVELS; i++) begin
+                for (int j = (1 << i) - 1; j < `N; j += 2 << i) adderLvl[0][j] = i;
+            end
+
+            for (int i = 0; i < `N; i++)
+                if (i + 1 < `N && vecID[0][i] == vecID[0][i + 1]) add_En[0][i] = 1;
+                else if (adderLvl[0][i] == 0) bypass_En[0][i] = 1;
+
+            for (int i = 0; i < `N; i++) begin
+                if (adderLvl[0][i] > 0) begin
+                    left_sel[0][i] = i - (1 << (adderLvl[0][i] - 1));
+                    right_sel[0][i] = i + (1 << (adderLvl[0][i] - 1));
+
+                    for (int j = 1; j < adderLvl[0][i]; j++) begin
+                        if (vecID[0][i - (1 << j)] != vecID[0][i]) begin
+                            left_sel[0][i] = i - j;
+                            break;
+                        end
+                    end
+                    for (int j = 1; j < adderLvl[0][i]; j++) begin
+                        if (vecID[0][i + (1 << j) + 1] != vecID[0][i]) begin
+                            right_sel[0][i] = i + j;
+                            break;
+                        end
+                    end
+                end
+            end
         end
     end
 
-    // Generate adder levels
+    data_t fan_data[NUM_LEVELS:0][`N-1:0];
+    data_t fan_register[`N-1:0];
     generate
         for (genvar level = 0; level < NUM_LEVELS; level++) begin : gen_level
-            localparam STEP = 2**level;
-            
-            for (genvar i = 0; i < `N; i++) begin : gen_adder
-                localparam LEFT_IDX = i - STEP;
-                localparam RIGHT_IDX = i + STEP;
-                
-                logic add_En;
-                logic [`lgN-1:0] adderLvl;
-                
-                // Determine adder level
-                always_comb begin
-                    adderLvl = 0;
-                    if (i >= (1 << level) - 1 && i < `N) begin
-                        adderLvl = level;
+            localparam step = 2 << level;
+            always_ff @(posedge clock or posedge reset) begin
+                if (reset) begin
+                    for (int i = 0; i < `N; i++) begin
+                        fan_data[level+1][i] <= 0;
+                        vecID[level+1][i] <= 0;
+                        add_En[level+1][i] <= 0;
+                        bypass_En[level+1][i] <= 0;
+                        left_sel[level+1][i] <= 0;
+                        right_sel[level+1][i] <= 0;
                     end
-                end
-
-                always_ff @(posedge clock or posedge reset) begin
-                    if (reset) begin
-                        level_data[level+1][i] <= '0;
-                        level_vecID[level+1][i] <= '0;
-                        level_outidx[level+1][i] <= '0;
-                    end else begin
-                        if (adderLvl == level) begin
-                            if (i >= STEP && level_vecID[level][i] == level_vecID[level][i-1]) begin
-                                // Perform addition if vecIDs match
-                                level_data[level+1][i] <= level_data[level][i] + level_data[level][LEFT_IDX];
-                            end else begin
-                                // Forward input when no addition needed
-                                level_data[level+1][i] <= level_data[level][i];
+                end else begin
+                    if (level == 0) begin
+                        for (int i = 0; i < `N; i += step) begin
+                            if (add_En[level][i]) begin
+                                fan_data[level+1][i] <= data[i] + data[i + 1];
+                                latest_out_idx[level][vecID[level][i]] <= i;
+                            end else if (bypass_En[level][i]) begin
+                                fan_data[level+1][i] <= data[i];
+                                fan_data[level+1][i + 1] <= data[i + 1];
+                                latest_out_idx[level][vecID[level][i]] <= i;
+                                latest_out_idx[level][vecID[level][i + 1]] <= i + 1;
                             end
-                        end else begin
-                            // Pass through data for non-active adder positions
-                            level_data[level+1][i] <= level_data[level][i];
                         end
-                        // Always forward control signals
-                        level_vecID[level+1][i] <= level_vecID[level][i];
-                        level_outidx[level+1][i] <= level_outidx[level][i];
+                        for (int i = 0; i < `N; i++) begin
+                            latest_out_idx[level+1][i] <= latest_out_idx[level][i];
+                            vecID[level+1][i] <= vecID[level][i];
+                            add_En[level+1][i] <= add_En[level][i];
+                            bypass_En[level+1][i] <= bypass_En[level][i];
+                            adderLvl[level+1][i] <= adderLvl[level][i];
+                            left_sel[level+1][i] <= left_sel[level][i];
+                            right_sel[level+1][i] <= right_sel[level][i];
+                        end
+                    end
+                    else begin
+                        for (int i = 0; i < `N; i++) fan_register[i] = fan_data[level][i];
+                        for (int i = (1 << level) - 1; i < `N; i += step) begin
+                            if (add_En[level][i]) begin
+                                fan_register[i] = fan_data[level][left_sel[level][i]] + fan_data[level][right_sel[level][i]];
+                                latest_out_idx[level][vecID[level][i]] <= i;
+                            end
+                        end
+                        for (int i = 0; i < `N; i++) begin
+                            fan_data[level+1][i] <= fan_register[i];
+                            latest_out_idx[level+1][i] <= latest_out_idx[level][i];
+                            vecID[level+1][i] <= vecID[level][i];
+                            add_En[level+1][i] <= add_En[level][i];
+                            bypass_En[level+1][i] <= bypass_En[level][i];
+                            adderLvl[level+1][i] <= adderLvl[level][i];
+                            left_sel[level+1][i] <= left_sel[level][i];
+                            right_sel[level+1][i] <= right_sel[level][i];
+                        end
                     end
                 end
             end
         end
     endgenerate
 
-    // Route outputs based on out_idx
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
-            out_data <= '{default: '0};
+            for (int i = 0; i < `N; i++) out_data[i] <= 0;
         end else begin
-            for (int i = 0; i < `N; i++) begin
-                out_data[i] <= level_data[NUM_LEVELS][level_outidx[NUM_LEVELS][i]];
-            end
+            for (int i = 0; i < `N; i++)
+                /*if (split[i])
+                    out_data[i] <= fan_data[NUM_LEVELS][latest_out_idx[NUM_LEVELS-1][i]];*/
+                if (i <= vecID[NUM_LEVELS][`N-1]) begin
+                    out_data[i] <= fan_data[NUM_LEVELS][latest_out_idx[NUM_LEVELS-1][i]];
+                    //out_data[i] <= fan_data[NUM_LEVELS][latest_out_idx[i]];
+                end
         end
     end
 
-    // Set fixed delay for pipelined version
-    assign delay = NUM_LEVELS + 2; // Input and output registers included
+
     assign num_el = `N;
+    assign delay = NUM_LEVELS+1;
 
 endmodule
+
 
 module PE(
     input   logic               clock,
@@ -298,7 +340,6 @@ module SpMM(
 
     // Input Part
     data_t rhs_buffer [`N-1:0][`N-1:0]; // RHS buffer - stores full NxN matrix
-    data_t rhs_trans [`N-1:0][`N-1:0]; // RHS transposed
     logic [$clog2(`N/4)-1:0] rhs_block_counter; // Counter for blocks of 4 rows during RHS loading progress
     logic rhs_loading_done; // Signal for lhs loading
     
