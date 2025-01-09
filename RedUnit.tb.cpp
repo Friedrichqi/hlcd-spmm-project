@@ -183,6 +183,21 @@ struct Data {
         res.make_out_data();
         return res;
     }
+    static Data init_FAN(Range rg, int n) {
+        Data res;
+        res.init(n);
+        for(int i = 0; i < n; i++) {
+            res.data[i] = rg.gen();
+            //res.split[i] = rand() % 3 == 0;
+            res.out_idx[i] = i % n;
+        }
+        res.split[2] = res.split[8] = res.split[12] = 1;//res.split[23] = res.split[31] = 1;
+        /*res.out_idx[0] = 2;
+        res.out_idx[1] = 8;
+        res.out_idx[2] = 12;*/
+        res.make_out_data();
+        return res;
+    }
 };
 
 } // namespace
@@ -245,9 +260,10 @@ int main(int argc, char ** argv) {
     };
     int score = 0;
     score += test_it("trace/RedUnit/01-single.vcd", make_data(Data::init_single));
-    // test_it("trace/RedUnit/02-full.vcd", make_data(Data::init_full));
-    // test_it("trace/RedUnit/03-random.vcd", make_data(Data::init_random));
-    // test_it("trace/RedUnit/04-shuffle.vcd", make_data(Data::init_shuffle));
+    score += test_it("trace/RedUnit/02-full.vcd", make_data(Data::init_full));
+    //test_it("trace/RedUnit/03-random.vcd", make_data(Data::init_random));
+    //test_it("trace/RedUnit/04-shuffle.vcd", make_data(Data::init_shuffle));
+    //test_it("trace/RedUnit/05-FAN.vcd", make_data(Data:: init_FAN));
     std::cerr << __FILE__ << " L1 SCORE: " << score << std::endl;
     return 0;
 }

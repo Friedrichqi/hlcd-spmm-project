@@ -70,6 +70,109 @@ module RedUnit(
     end
 endmodule
 
+module RedUnit1(
+    input   logic               clock,
+                                reset,
+    input   data_t              data[`N-1:0],
+    input   logic               split[`N-1:0],
+    input   logic [`lgN-1:0]    out_idx[`N-1:0],
+    output  data_t              out_data[`N-1:0],
+    output  int                 delay,
+    output  int                 num_el
+);
+    localparam NUM_LEVELS = $clog2(`N);
+
+    // Each level's input and output registers
+    data_t level_data[NUM_LEVELS:0][`N-1:0];
+    logic [`lgN-1:0] level_vecID[NUM_LEVELS:0][`N-1:0];
+    logic [`lgN-1:0] level_outidx[NUM_LEVELS:0][`N-1:0];
+
+    // Calculate vector IDs based on split signal
+    logic [`lgN-1:0] vecID[`N-1:0];
+    always_comb begin
+        vecID[0] = '0;
+        for (int i = 1; i < `N; i++) begin
+            vecID[i] = split[i-1] ? vecID[i-1] + 1 : vecID[i-1];
+        end
+    end
+
+    // Input registration - Level 0
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            level_data[0] <= '{default: '0};
+            level_vecID[0] <= '{default: '0};
+            level_outidx[0] <= '{default: '0};
+        end else begin
+            level_data[0] <= data;
+            level_vecID[0] <= vecID;
+            level_outidx[0] <= out_idx;
+        end
+    end
+
+    // Generate adder levels
+    generate
+        for (genvar level = 0; level < NUM_LEVELS; level++) begin : gen_level
+            localparam STEP = 2**level;
+            
+            for (genvar i = 0; i < `N; i++) begin : gen_adder
+                localparam LEFT_IDX = i - STEP;
+                localparam RIGHT_IDX = i + STEP;
+                
+                logic add_En;
+                logic [`lgN-1:0] adderLvl;
+                
+                // Determine adder level
+                always_comb begin
+                    adderLvl = 0;
+                    if (i >= (1 << level) - 1 && i < `N) begin
+                        adderLvl = level;
+                    end
+                end
+
+                always_ff @(posedge clock or posedge reset) begin
+                    if (reset) begin
+                        level_data[level+1][i] <= '0;
+                        level_vecID[level+1][i] <= '0;
+                        level_outidx[level+1][i] <= '0;
+                    end else begin
+                        if (adderLvl == level) begin
+                            if (i >= STEP && level_vecID[level][i] == level_vecID[level][i-1]) begin
+                                // Perform addition if vecIDs match
+                                level_data[level+1][i] <= level_data[level][i] + level_data[level][LEFT_IDX];
+                            end else begin
+                                // Forward input when no addition needed
+                                level_data[level+1][i] <= level_data[level][i];
+                            end
+                        end else begin
+                            // Pass through data for non-active adder positions
+                            level_data[level+1][i] <= level_data[level][i];
+                        end
+                        // Always forward control signals
+                        level_vecID[level+1][i] <= level_vecID[level][i];
+                        level_outidx[level+1][i] <= level_outidx[level][i];
+                    end
+                end
+            end
+        end
+    endgenerate
+
+    // Route outputs based on out_idx
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            out_data <= '{default: '0};
+        end else begin
+            for (int i = 0; i < `N; i++) begin
+                out_data[i] <= level_data[NUM_LEVELS][level_outidx[NUM_LEVELS][i]];
+            end
+        end
+    end
+
+    // Set fixed delay for pipelined version
+    assign delay = NUM_LEVELS + 2; // Input and output registers included
+    assign num_el = `N;
+
+endmodule
+
 module PE(
     input   logic               clock,
                                 reset,

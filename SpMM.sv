@@ -29,7 +29,7 @@ module mul_(
     end
 endmodule
 
-module RedUnit(
+module RedUnit1(
     input   logic               clock,
                                 reset,
     input   data_t              data[`N-1:0],
@@ -70,7 +70,7 @@ module RedUnit(
     end
 endmodule
 
-module RedUnit_FAN(
+module RedUnit(
     input   logic               clock,
                                 reset,
     input   data_t              data[`N-1:0],
@@ -78,91 +78,142 @@ module RedUnit_FAN(
     input   logic [`lgN-1:0]    out_idx[`N-1:0],
     output  data_t              out_data[`N-1:0],
     output  int                 delay,
-    output  int                 num_el
+    output  int                 num_el,
 );
     localparam NUM_LEVELS = $clog2(`N);
-    
-    // Register arrays for partial sums and intermediate results from each level of the FAN network
-    data_t fan_level[NUM_LEVELS:0][`N-1:0];
-    logic valid_level[NUM_LEVELS:0][`N-1:0];
-    
-    // First level initialization - copy input data
+    logic [NUM_LEVELS:0] vecID [NUM_LEVELS:0][`N-1:0];
+    int adderLvl [NUM_LEVELS:0][`N-1:0];
+    logic add_En[NUM_LEVELS:0][`N-1:0];
+    logic bypass_En[NUM_LEVELS:0][`N-1:0];
+    logic [$clog2(`N)-1:0] left_sel[NUM_LEVELS:0][`N-1:0];
+    logic [$clog2(`N)-1:0] right_sel[NUM_LEVELS:0][`N-1:0];
+    logic [NUM_LEVELS:0] latest_out_idx[NUM_LEVELS:0][`N-1:0];
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
             for (int i = 0; i < `N; i++) begin
-                fan_level[0][i] <= '0;
-                valid_level[0][i] <= '0;
+                vecID[0][i] = 0;
+                add_En[0][i] = 0;
+                bypass_En[0][i] = 0;
+                adderLvl[0][i] = 0;
+                left_sel[0][i] = 0;
+                right_sel[0][i] = 0;
             end
         end else begin
+            for (int i = 1; i < `N; i++) vecID[0][i] = split[i - 1] ? vecID[0][i - 1] + 1 : vecID[0][i - 1];
+            
+            for (int i = 0; i < `N; i++) adderLvl[0][i] = 0;
+            for (int i = 0; i < NUM_LEVELS; i++) begin
+                for (int j = (1 << i) - 1; j < `N; j += 2 << i) adderLvl[0][j] = i;
+            end
+
+            for (int i = 0; i < `N; i++)
+                if (i + 1 < `N && vecID[0][i] == vecID[0][i + 1]) add_En[0][i] = 1;
+                else if (adderLvl[0][i] == 0) bypass_En[0][i] = 1;
+
             for (int i = 0; i < `N; i++) begin
-                fan_level[0][i] <= data[i];
-                valid_level[0][i] <= 1'b1;
+                if (adderLvl[0][i] > 0) begin
+                    left_sel[0][i] = i - (1 << (adderLvl[0][i] - 1));
+                    right_sel[0][i] = i + (1 << (adderLvl[0][i] - 1));
+
+                    for (int j = 1; j < adderLvl[0][i]; j++) begin
+                        if (vecID[0][i - (1 << j)] != vecID[0][i]) begin
+                            left_sel[0][i] = i - j;
+                            break;
+                        end
+                    end
+                    for (int j = 1; j < adderLvl[0][i]; j++) begin
+                        if (vecID[0][i + (1 << j) + 1] != vecID[0][i]) begin
+                            right_sel[0][i] = i + j;
+                            break;
+                        end
+                    end
+                end
             end
         end
     end
 
-    // Generate the FAN network levels
-    genvar level, idx;
+    data_t fan_data[NUM_LEVELS:0][`N-1:0];
+    data_t fan_register[`N-1:0];
     generate
-        for (level = 0; level < NUM_LEVELS; level++) begin : fan_levels
-            localparam LEVEL_WIDTH = `N >> level;
-            
-            for (idx = 0; idx < LEVEL_WIDTH-1; idx += 2) begin : level_units
-                // Determine if we should add these elements based on split signal
-                wire should_add = !split[idx] && valid_level[level][idx] && valid_level[level][idx+1];
-                
-                always_ff @(posedge clock or posedge reset) begin
-                    if (reset) begin
-                        fan_level[level+1][idx/2] <= '0;
-                        valid_level[level+1][idx/2] <= '0;
-                    end else begin
-                        if (should_add) begin
-                            // Add elements if they belong to the same group
-                            //fan_level[level+1][idx/2] <= fan_level[level][idx] + fan_level[level][idx+1];
-                            add_(.clock(clock), .a(fan_level[level][idx]), .b(fan_level[level][idx+1]), .out(fan_level[level+1][idx/2]));
-                            
-                            valid_level[level+1][idx/2] <= 1'b1;
-                        end else begin
-                            // Forward the element based on split signal
-                            fan_level[level+1][idx/2] <= fan_level[level][idx];
-                            valid_level[level+1][idx/2] <= valid_level[level][idx];
+        for (genvar level = 0; level < NUM_LEVELS; level++) begin : gen_level
+            localparam step = 2 << level;
+            always_ff @(posedge clock or posedge reset) begin
+                if (reset) begin
+                    for (int i = 0; i < `N; i++) begin
+                        fan_data[level+1][i] <= 0;
+                        vecID[level+1][i] <= 0;
+                        add_En[level+1][i] <= 0;
+                        bypass_En[level+1][i] <= 0;
+                        left_sel[level+1][i] <= 0;
+                        right_sel[level+1][i] <= 0;
+                    end
+                end else begin
+                    if (level == 0) begin
+                        for (int i = 0; i < `N; i += step) begin
+                            if (add_En[level][i]) begin
+                                fan_data[level+1][i] <= data[i] + data[i + 1];
+                                latest_out_idx[level][vecID[level][i]] <= i;
+                            end else if (bypass_En[level][i]) begin
+                                fan_data[level+1][i] <= data[i];
+                                fan_data[level+1][i + 1] <= data[i + 1];
+                                latest_out_idx[level][vecID[level][i]] <= i;
+                                latest_out_idx[level][vecID[level][i + 1]] <= i + 1;
+                            end
+                        end
+                        for (int i = 0; i < `N; i++) begin
+                            latest_out_idx[level+1][i] <= latest_out_idx[level][i];
+                            vecID[level+1][i] <= vecID[level][i];
+                            add_En[level+1][i] <= add_En[level][i];
+                            bypass_En[level+1][i] <= bypass_En[level][i];
+                            adderLvl[level+1][i] <= adderLvl[level][i];
+                            left_sel[level+1][i] <= left_sel[level][i];
+                            right_sel[level+1][i] <= right_sel[level][i];
                         end
                     end
-                end
-                
-                // Implement forwarding paths for flexible routing
-                always_ff @(posedge clock or posedge reset) begin
-                    if (reset) begin
-                        fan_level[level+1][idx/2 + 1] <= '0;
-                        valid_level[level+1][idx/2 + 1] <= '0;
-                    end else if (split[idx]) begin
-                        fan_level[level+1][idx/2 + 1] <= fan_level[level][idx+1];
-                        valid_level[level+1][idx/2 + 1] <= valid_level[level][idx+1];
+                    else begin
+                        for (int i = 0; i < `N; i++) fan_register[i] = fan_data[level][i];
+                        for (int i = (1 << level) - 1; i < `N; i += step) begin
+                            if (add_En[level][i]) begin
+                                fan_register[i] = fan_data[level][left_sel[level][i]] + fan_data[level][right_sel[level][i]];
+                                latest_out_idx[level][vecID[level][i]] <= i;
+                            end
+                        end
+                        for (int i = 0; i < `N; i++) begin
+                            fan_data[level+1][i] <= fan_register[i];
+                            latest_out_idx[level+1][i] <= latest_out_idx[level][i];
+                            vecID[level+1][i] <= vecID[level][i];
+                            add_En[level+1][i] <= add_En[level][i];
+                            bypass_En[level+1][i] <= bypass_En[level][i];
+                            adderLvl[level+1][i] <= adderLvl[level][i];
+                            left_sel[level+1][i] <= left_sel[level][i];
+                            right_sel[level+1][i] <= right_sel[level][i];
+                        end
                     end
                 end
             end
         end
     endgenerate
 
-    // Output routing based on out_idx
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
-            for (int i = 0; i < `N; i++) begin
-                out_data[i] <= '0;
-            end
+            for (int i = 0; i < `N; i++) out_data[i] <= 0;
         end else begin
-            for (int i = 0; i < `N; i++) begin
-                out_data[out_idx[i]] <= fan_level[NUM_LEVELS-1][i];
-            end
+            for (int i = 0; i < `N; i++)
+                /*if (split[i])
+                    out_data[i] <= fan_data[NUM_LEVELS][latest_out_idx[NUM_LEVELS-1][i]];*/
+                if (i <= vecID[NUM_LEVELS][`N-1]) begin
+                    out_data[i] <= fan_data[NUM_LEVELS][latest_out_idx[NUM_LEVELS-1][i]];
+                    //out_data[i] <= fan_data[NUM_LEVELS][latest_out_idx[i]];
+                end
         end
     end
 
-    // Set constant parameters
+
     assign num_el = `N;
-    // Delay is NUM_LEVELS + 1 (input register) + 1 (output register)
-    assign delay = NUM_LEVELS + 2;
+    assign delay = NUM_LEVELS+1;
 
 endmodule
+
 
 module PE(
     input   logic               clock,
