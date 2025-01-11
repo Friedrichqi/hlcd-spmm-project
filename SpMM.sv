@@ -83,14 +83,18 @@ module RedUnit(
     input   data_t              halo_in
 );
     localparam NUM_LEVELS = $clog2(`N);
+    //vecID 表示这一组待累加的数据属于第几行
     logic [NUM_LEVELS:0] vecID [NUM_LEVELS:0][`N-1:0];
     int adderLvl [NUM_LEVELS:0][`N-1:0];
     logic add_En[NUM_LEVELS:0][`N-1:0];
     logic bypass_En[NUM_LEVELS:0][`N-1:0];
     logic [NUM_LEVELS:0] left_sel[NUM_LEVELS:0][`N-1:0];
     logic [NUM_LEVELS:0] right_sel[NUM_LEVELS:0][`N-1:0];
+    //fan_out_idx 表示这一行数据在FAN network结构中的的输出位置
     logic [NUM_LEVELS:0] fan_out_idx[NUM_LEVELS:0][`N-1:0];
+    //split_register 表示FAN network最后一行数据是否需要分裂
     logic split_register [NUM_LEVELS:0][`N-1:0];
+    //out_idx_register 表示FAN network最后一行数据的输出位置
     logic [`lgN-1:0] out_idx_register[NUM_LEVELS:0][`N-1:0];
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
@@ -145,9 +149,13 @@ module RedUnit(
         end
     end
 
+    //fan_data 表示FAN network中每一行加法器中的数据
     data_t fan_data[NUM_LEVELS:0][`N-1:0];
+    //fan_register 表示FAN network中上一行处理完的数据（输出），作为下一行的输入
     data_t fan_register[NUM_LEVELS:0][`N-1:0];
+    //fan_out_idx_register 表示FAN network中上一行处理完的数据的输出位置，在下一行处理完后，可能会更新到这一组数据中最深的累加器/register编号
     logic [NUM_LEVELS:0] fan_out_idx_register[NUM_LEVELS:0][`N-1:0];
+    //out_data_register 表示FAN network中最后一行的输出数据转换成prefix结构的输出数据
     data_t out_data_register[`N-1:0];
     generate
         for (genvar level = 0; level < NUM_LEVELS; level++) begin : gen_level
@@ -224,7 +232,8 @@ module RedUnit(
                             end
                             for (int i = 0; i < `N; i++) out_data[i] = out_data_register[out_idx_register[NUM_LEVELS-1][i]];
                             if (!split_register[NUM_LEVELS-1][`N-1])
-                                halo_out = fan_register[NUM_LEVELS-1][vecID[NUM_LEVELS-1][`N-1]];
+                                halo_out = fan_register[NUM_LEVELS-1][fan_out_idx_register[NUM_LEVELS-1][vecID[NUM_LEVELS-1][`N-1]]];
+                            else halo_out = 0;
                         end
                     end
                 end
@@ -352,6 +361,22 @@ module PE(
         .halo_in(halo_in)
     );
 
+
+    //IMPORTANT: The following code can be a bug source(to be checked)
+    /*logic zero[$clog2(`N):0][`N-1:0];
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            out = '{default: 0};
+            zero[0] = '{default: 0};
+        end else begin
+            for (int i = 0; i < $clog2(`N); i++) zero[i + 1] <= zero[i];
+            for (int i = 1; i < `N; ++i)
+                if (lhs_ptr[i] == lhs_ptr[i - 1])
+                    zero[0][i] = 1;
+            for (int i = 0; i < current_row_output; i++)
+                if (!zero[red_delay][i]) out[i] = out_buffer[i];
+        end
+    end*/
     logic zero[`N-1:0];
     always_comb begin
         out = '{default: 0};
@@ -362,6 +387,7 @@ module PE(
         for (int i = 0; i < current_row_output; i++)
             if (!zero[i]) out[i] = out_buffer[i];
     end
+
     assign delay = red_delay + 1;
 endmodule
 

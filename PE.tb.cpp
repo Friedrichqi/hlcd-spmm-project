@@ -304,11 +304,11 @@ int main() {
     test_it("trace/PE/06-rand-Q1.vcd", Data::new_with(&Data::init_rand, num_el, Range{Q0, Q1}));
     test_it("trace/PE/07-rand-Q2.vcd", Data::new_with(&Data::init_rand, num_el, Range{Q1, Q2}));
     test_it("trace/PE/08-rand-Q3.vcd", Data::new_with(&Data::init_rand, num_el, Range{Q2, Q3}));
-    //test_it("trace/PE/09-rand-Q4.vcd", Data::new_with(&Data::init_rand, num_el, Range{Q3, Q4}));
-    //test_it("trace/PE/10-rand-H1.vcd", Data::new_with(&Data::init_rand, num_el, Range{Q0, Q2}));
-    //test_it("trace/PE/11-rand-H2.vcd", Data::new_with(&Data::init_rand, num_el, Range{Q1, Q3}));
-    //test_it("trace/PE/12-rand-H3.vcd", Data::new_with(&Data::init_rand, num_el, Range{Q2, Q4}));
-    //test_it("trace/PE/13-rand.vcd", Data::new_with(&Data::init_rand, num_el, Range{Q0, Q4}));
+    test_it("trace/PE/09-rand-Q4.vcd", Data::new_with(&Data::init_rand, num_el, Range{Q3, Q4}));
+    test_it("trace/PE/10-rand-H1.vcd", Data::new_with(&Data::init_rand, num_el, Range{Q0, Q2}));
+    test_it("trace/PE/11-rand-H2.vcd", Data::new_with(&Data::init_rand, num_el, Range{Q1, Q3}));
+    test_it("trace/PE/12-rand-H3.vcd", Data::new_with(&Data::init_rand, num_el, Range{Q2, Q4}));
+    test_it("trace/PE/13-rand.vcd", Data::new_with(&Data::init_rand, num_el, Range{Q0, Q4}));
     std::cerr << __FILE__ << " L1 SCORE: " << score << std::endl;
     return 0;
 }
