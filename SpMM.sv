@@ -278,12 +278,22 @@ module PE(
 
     // split 用于记录 lhs_ptr 的变化
     logic split[`N-1:0];
+    logic red_split[`N-1:0];
     logic [`lgN:0] current_pos_ptr;
     logic [`lgN:0] current_row_data;
     logic [`lgN:0] current_row_output;
     logic [`lgN-1:0] out_idx[`N-1:0];
     // current_row_data 记录当前data的部分和求到哪一行了
     // current_row_output 记录当前out_idx输出到哪一行了
+
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            red_split <= '{default: 0};
+        end else begin
+            red_split <= split;
+        end
+    end
+
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
             split = '{default: 0};
@@ -304,6 +314,7 @@ module PE(
             current_row_data++;
         end
     end
+
 
     // mult_result 用于记录乘法结果
     data_t mult_result[`N-1:0];
@@ -332,7 +343,7 @@ module PE(
         .clock(clock),
         .reset(reset),
         .data(mult_result),
-        .split(split),
+        .split(red_split),
         .out_idx(out_idx),
         .out_data(out_buffer),
         .delay(red_delay),
