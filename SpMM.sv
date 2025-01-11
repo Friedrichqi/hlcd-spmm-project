@@ -148,6 +148,7 @@ module RedUnit(
     data_t fan_data[NUM_LEVELS:0][`N-1:0];
     data_t fan_register[NUM_LEVELS:0][`N-1:0];
     logic [NUM_LEVELS:0] fan_out_idx_register[NUM_LEVELS:0][`N-1:0];
+    data_t out_data_register[`N-1:0];
     generate
         for (genvar level = 0; level < NUM_LEVELS; level++) begin : gen_level
             localparam step = 2 << level;
@@ -213,14 +214,26 @@ module RedUnit(
                             left_sel[level+1][i] <= left_sel[level][i];
                             right_sel[level+1][i] <= right_sel[level][i];
                         end
+
+                        if (level == NUM_LEVELS-1) begin
+                            for (int i = 0; i < `N; i++) begin
+                                out_data_register[i] = 0;
+                                if (split_register[NUM_LEVELS-1][i])
+                                    out_data_register[i] = fan_register[NUM_LEVELS-1][fan_out_idx_register[NUM_LEVELS-1][vecID[NUM_LEVELS-1][i]]];
+                                if (vecID[NUM_LEVELS-1][i] == 0) out_data_register[i] += halo_in;
+                            end
+                            for (int i = 0; i < `N; i++) out_data[i] = out_data_register[out_idx_register[NUM_LEVELS-1][i]];
+                            if (!split_register[NUM_LEVELS-1][`N-1])
+                                halo_out = fan_register[NUM_LEVELS-1][vecID[NUM_LEVELS-1][`N-1]];
+                        end
                     end
                 end
             end
         end
     endgenerate
 
-    data_t out_data_register[`N-1:0];
-    always_ff @(posedge clock or posedge reset) begin
+    
+    /*always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
             for (int i = 0; i < `N; i++) out_data[i] <= 0;
         end else begin
@@ -228,17 +241,17 @@ module RedUnit(
                 out_data_register[i] = 0;
                 if (split_register[NUM_LEVELS][i])
                     out_data_register[i] = fan_data[NUM_LEVELS][fan_out_idx[NUM_LEVELS][vecID[NUM_LEVELS][i]]];
-                    if (vecID[NUM_LEVELS][i] == 0) out_data_register[i] += halo_in;
+                if (vecID[NUM_LEVELS][i] == 0) out_data_register[i] += halo_in;
             end
             for (int i = 0; i < `N; i++) out_data[i] <= out_data_register[out_idx_register[NUM_LEVELS][i]];
             if (!split_register[NUM_LEVELS][`N-1])
                 halo_out <= fan_data[NUM_LEVELS][vecID[NUM_LEVELS][`N-1]];
         end
-    end
+    end*/
 
 
     assign num_el = `N;
-    assign delay = NUM_LEVELS+1;
+    assign delay = NUM_LEVELS;
 
 endmodule
 
@@ -338,7 +351,7 @@ module PE(
         for (int i = 0; i < current_row_output; i++)
             if (!zero[i]) out[i] = out_buffer[i];
     end
-    assign delay = red_delay;
+    assign delay = red_delay + 1;
 endmodule
 
 module SpMM(
