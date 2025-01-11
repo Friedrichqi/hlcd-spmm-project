@@ -79,6 +79,8 @@ module RedUnit(
     output  data_t              out_data[`N-1:0],
     output  int                 delay,
     output  int                 num_el,
+    output  data_t              halo_out,
+    input   data_t              halo_in
 );
     localparam NUM_LEVELS = $clog2(`N);
     logic [NUM_LEVELS:0] vecID [NUM_LEVELS:0][`N-1:0];
@@ -87,7 +89,7 @@ module RedUnit(
     logic bypass_En[NUM_LEVELS:0][`N-1:0];
     logic [NUM_LEVELS:0] left_sel[NUM_LEVELS:0][`N-1:0];
     logic [NUM_LEVELS:0] right_sel[NUM_LEVELS:0][`N-1:0];
-    logic [NUM_LEVELS:0] out_idx_vecID[NUM_LEVELS:0][`N-1:0];
+    logic [NUM_LEVELS:0] fan_out_idx[NUM_LEVELS:0][`N-1:0];
     logic split_register [NUM_LEVELS:0][`N-1:0];
     logic [`lgN-1:0] out_idx_register[NUM_LEVELS:0][`N-1:0];
     always_ff @(posedge clock or posedge reset) begin
@@ -105,7 +107,6 @@ module RedUnit(
         end else begin
             split_register[0] = split;
             out_idx_register[0] = out_idx;
-            for (int i = 0; i < `N; i++) vecID[0][i] = 0;
             for (int i = 1; i < `N; i++) vecID[0][i] = split[i - 1] ? vecID[0][i - 1] + 1 : vecID[0][i - 1];
             
             for (int i = 0; i < `N; i++) adderLvl[0][i] = 0;
@@ -122,10 +123,6 @@ module RedUnit(
                 if (i + 1 < `N && vecID[0][i] == vecID[0][i + 1]) add_En[0][i] = 1;
                 else if (adderLvl[0][i] == 0) bypass_En[0][i] = 1;
 
-            for (int i = 0; i < `N; i++) begin
-                left_sel[0][i] = 0;
-                right_sel[0][i] = 0;
-            end
             for (int i = 0; i < `N; i++) begin
                 if (adderLvl[0][i] > 0) begin
                     left_sel[0][i] = i - (1 << (adderLvl[0][i] - 1));
@@ -150,7 +147,7 @@ module RedUnit(
 
     data_t fan_data[NUM_LEVELS:0][`N-1:0];
     data_t fan_register[NUM_LEVELS:0][`N-1:0];
-    logic [NUM_LEVELS:0] out_idx_vecID_register[NUM_LEVELS:0][`N-1:0];
+    logic [NUM_LEVELS:0] fan_out_idx_register[NUM_LEVELS:0][`N-1:0];
     generate
         for (genvar level = 0; level < NUM_LEVELS; level++) begin : gen_level
             localparam step = 2 << level;
@@ -171,12 +168,12 @@ module RedUnit(
                         for (int i = 0; i < `N; i += step) begin
                             if (add_En[level][i]) begin
                                 fan_data[level+1][i] <= data[i] + data[i + 1];
-                                out_idx_vecID[level+1][vecID[level][i]] <= i;
+                                fan_out_idx[level+1][vecID[level][i]] <= i;
                             end else if (bypass_En[level][i]) begin
                                 fan_data[level+1][i] <= data[i];
                                 fan_data[level+1][i + 1] <= data[i + 1];
-                                out_idx_vecID[level+1][vecID[level][i]] <= i;
-                                out_idx_vecID[level+1][vecID[level][i + 1]] <= i + 1;
+                                fan_out_idx[level+1][vecID[level][i]] <= i;
+                                fan_out_idx[level+1][vecID[level][i + 1]] <= i + 1;
                             end
                         end
                         for (int i = 0; i < `N; i++) begin
@@ -193,7 +190,7 @@ module RedUnit(
                     else begin
                         for (int i = 0; i < `N; i++) begin
                             fan_register[level][i] = fan_data[level][i];
-                            out_idx_vecID_register[level][i] = out_idx_vecID[level][i];
+                            fan_out_idx_register[level][i] = fan_out_idx[level][i];
                         end
                         for (int i = (1 << level) - 1; i < `N; i += step) begin
                             if (add_En[level][i]) begin
@@ -201,14 +198,14 @@ module RedUnit(
                                 if (bypass_En[level][left_sel[level][i]]) fan_register[level][i] += fan_data[level][left_sel[level][i]+1];
                                 else fan_register[level][i] += fan_data[level][left_sel[level][i]];
                                 fan_register[level][i] += fan_data[level][right_sel[level][i]];
-                                out_idx_vecID_register[level][vecID[level][i]] = i;
+                                fan_out_idx_register[level][vecID[level][i]] = i;
                             end
                         end
                         for (int i = 0; i < `N; i++) begin
                             out_idx_register[level+1][i] <= out_idx_register[level][i];
                             split_register[level+1][i] <= split_register[level][i];
                             fan_data[level+1][i] <= fan_register[level][i];
-                            out_idx_vecID[level+1][i] <= out_idx_vecID_register[level][i];
+                            fan_out_idx[level+1][i] <= fan_out_idx_register[level][i];
                             vecID[level+1][i] <= vecID[level][i];
                             add_En[level+1][i] <= add_En[level][i];
                             bypass_En[level+1][i] <= bypass_En[level][i];
@@ -230,9 +227,12 @@ module RedUnit(
             for (int i = 0; i < `N; i++) begin
                 out_data_register[i] = 0;
                 if (split_register[NUM_LEVELS][i])
-                    out_data_register[i] = fan_data[NUM_LEVELS][out_idx_vecID[NUM_LEVELS][vecID[NUM_LEVELS][i]]];
+                    out_data_register[i] = fan_data[NUM_LEVELS][fan_out_idx[NUM_LEVELS][vecID[NUM_LEVELS][i]]];
+                    if (vecID[NUM_LEVELS][i] == 0) out_data_register[i] += halo_in;
             end
             for (int i = 0; i < `N; i++) out_data[i] <= out_data_register[out_idx_register[NUM_LEVELS][i]];
+            if (!split_register[NUM_LEVELS][`N-1])
+                halo_out <= fan_data[NUM_LEVELS][vecID[NUM_LEVELS][`N-1]];
         end
     end
 
