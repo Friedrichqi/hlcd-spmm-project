@@ -417,85 +417,141 @@ module SpMM(
     //Definations
 
     // Input Part
-    data_t rhs_buffer [`N-1:0][`N-1:0]; // RHS buffer - stores full NxN matrix
+    data_t rhs_buffer [1:0][`N-1:0][`N-1:0]; // RHS buffer - stores full NxN matrix
     logic [$clog2(`N/4)-1:0] rhs_block_counter; // Counter for blocks of 4 rows during RHS loading progress
-    logic rhs_loading_done; // Signal for lhs loading
+    logic [1:0] rhs_buffer_counter;
+    logic rhs_transfer_done; // Flag to indicate when RHS loading is done and transfered to processing buffer
     
     // Output Part
     logic [$clog2(`N/4)-1:0] output_counter; // Counter for blocks of 4 rows during output progress
-    logic output_done; // Signal for output done
-    data_t out_buffer [`N-1:0][`N-1:0]; // Output buffer
+    data_t out_buffer [1:0][`N-1:0][`N-1:0]; // Output buffer
+    logic [1:0] out_buffer_counter;
     
     //Processing Part
     logic [$clog2(`N):0] processing_counter; // Counter for processing time, deciding when to output
-    logic processing_done; // Signal for output ready
     int pe_delay;
     data_t pe_outputs [`N-1:0][`N-1:0]; // PE Output buffers
 
-    
 
-
-    //State Machine
     typedef enum logic [1:0] {
-        IDLE,
-        LOADING_RHS,
-        PROCESSING,
-        OUTPUT
-    } state_t;
-    state_t current_state, next_state;
+        RHS_IDLE,
+        RHS_LOAD,
+        RHS_TRANSFER
+    } rhs_state_t;
 
+    rhs_state_t rhs_state, rhs_state_next;
+
+    // State register
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
-            current_state <= IDLE;
-            rhs_block_counter <= 0;
-            rhs_loading_done <= 0;
-            processing_counter <= 0;
-            processing_done <= 0;
-            out_ready = 0;
-            output_counter <= 0;
-        end else current_state <= next_state;
+            rhs_state         <= RHS_IDLE;
+            rhs_block_counter <= '0;
+            rhs_ready         <= 1'b0;
+            rhs_transfer_done <= 1'b0;
+        end
+        else rhs_state <= rhs_state_next;
     end
 
-    // Next state logic
+    // Next-state & output logic
     always_comb begin
-        next_state = current_state;
-        case (current_state)
-            IDLE: begin
-                if (rhs_start)
-                    next_state = LOADING_RHS;
+        // Default assignments
+        rhs_state_next = rhs_state;
+        rhs_ready      = 1'b0;  
+        case (rhs_state)
+            RHS_IDLE: begin
+                rhs_state_next = RHS_LOAD;
+                rhs_ready = 1'b1;  // Ready to load data
             end
-            LOADING_RHS: begin
-                if (rhs_loading_done)
-                    next_state = PROCESSING;
+
+            RHS_LOAD: begin
+                rhs_ready = 0;  // We are in the midst of loading data
+                if (rhs_block_counter == (`N/4)) rhs_state_next = RHS_TRANSFER;
             end
-            PROCESSING: begin
-                if (processing_done)
-                    next_state = OUTPUT;
-            end
-            OUTPUT: begin
-                out_ready = 1;
-                if (output_done)
-                    next_state = IDLE;
+
+            RHS_TRANSFER: begin
+                if (rhs_transfer_done) rhs_state_next = RHS_IDLE;
             end
         endcase
     end
 
+    // Data‐path for reading 4 rows at a time
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            rhs_block_counter <= '0;
+            rhs_buf_sel       <= 1'b0;
+            rhs_valid         <= 1'b0;
+        end
+        else begin
+            case (rhs_state)
+                RHS_IDLE: begin
+                    rhs_block_counter <= 0;
+                    rhs_buffer_counter <= 0;
+                end
 
+                RHS_LOAD: begin
+                    for (int i = 0; i < 4; i++)
+                        for (int j = 0; j < `N; j++)
+                            rhs_buffer[1][j][rhs_block_counter * 4 + i] <= rhs_data[i][j];
+
+                    rhs_block_counter <= rhs_block_counter + 1'b1;
+                    if (rhs_block_counter == (`N/4)) rhs_buffer_counter <= rhs_buffer_counter + 1'b1;
+                end
+
+                RHS_TRANSFER: begin
+                    if (!lhs_ws or rhs_buffer_counter < 2) begin
+                        for (int i = 0; i < `N; i++)
+                            for (int j = 0; j < `N; j++)
+                                rhs_buffer[0][i][j] <= rhs_buffer[1][i][j];
+                        rhs_transfer_done <= 1'b1;
+                        if (rhs_buffer_counter == 2) rhs_buffer_counter <= rhs_buffer_counter - 1;
+                    end
+                end
+            endcase
+        end
+    end
+
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            lhs_valid = 0;
+            output_valid = 0;
+            rhs_block_counter = 0;
+            rhs_buffer_counter <= 0;
+            output_counter = 0;
+            out_buffer_counter = 0;
+            processing_counter = 0;
+        end
+    end
     // RHS Buffer Loading Logic
+    logic rhs_valid;
     always_ff @(posedge clock) begin
-        if (current_state != LOADING_RHS) begin
-            rhs_loading_done <= 0;
-            rhs_block_counter <= 0;
+        rhs_valid <= rhs_start || rhs_valid;
+        if (!rhs_valid) begin
+            rhs_block_counter = 0;
         end else begin
             // Load 4 rows at a time
             for (int i = 0; i < 4; i++)
                 for (int j = 0; j < `N; j++)
-                    rhs_buffer[j][rhs_block_counter * 4 + i] <= rhs_data[i][j];
+                    rhs_buffer[1][j][rhs_block_counter * 4 + i] <= rhs_data[i][j];
             
-            // Update counter
-            if (rhs_block_counter < (`N/4) - 1) rhs_block_counter <= rhs_block_counter + 1;
-            else rhs_loading_done <= 1;
-        end 
+            rhs_block_counter++;
+            if (rhs_block_counter == (`N/4)) begin
+                rhs_valid <= 0;
+                rhs_buffer_counter <= rhs_buffer_counter + 1;
+                if (rhs_buffer_counter == 2 && lhs_ws) rhs_ready <= 0;
+                else rhs_ready <= 1;
+            end
+        end
+        if (rhs_ready) rhs_ready <= 0;
+    end
+
+    //If !ws, previous rhs_buffer[0] is discarded. rhs_buffer[1] is moved to rhs_buffer[0].
+    always_ff @(posedge rhs_ready) begin
+        if (!lhs_ws && rhs_buffer_counter > 0) begin
+            for (int i = 0; i < `N; i++)
+                for (int j = 0; j < `N; j++)
+                    rhs_buffer[0][i][j] <= rhs_buffer[1][i][j];
+            rhs_buffer_counter <= rhs_buffer_counter - 1;
+        end
     end
 
     // PE array instantiation - N PEs, each processing one column
@@ -505,11 +561,11 @@ module SpMM(
             PE pe_inst (
                 .clock(clock),
                 .reset(reset),
-                .lhs_start(lhs_start && current_state == PROCESSING),
+                .lhs_start(lhs_start),
                 .lhs_ptr(lhs_ptr),
                 .lhs_col(lhs_col),
                 .lhs_data(lhs_data),
-                .rhs(rhs_buffer[i]),
+                .rhs(rhs_buffer[0][i]),
                 .out(pe_outputs[i]),
                 .delay(pe_delay),
                 .num_el()
@@ -517,43 +573,62 @@ module SpMM(
         end
     endgenerate
 
+    logic lhs_valid;
+    assign lhs_valid = lhs_start || lhs_valid;
     always_ff @(posedge clock) begin
-        if (current_state != PROCESSING) begin  
-            processing_counter <= 0;
-            processing_done <= 0;
+        if (!lhs_valid) begin  
+            processing_counter = 0;
         end else begin
             if (processing_counter < (`N + pe_delay)) begin
-                processing_counter <= processing_counter + 1;
                 for (int i = 0; i < `N; ++i)
-                    out_buffer[processing_counter-pe_delay][i] = pe_outputs[i][processing_counter-pe_delay];
-            end else processing_done <= 1;
+                    if (processing_counter >= pe_delay) begin
+                        if (lhs_os)
+                            out_buffer[1][processing_counter-pe_delay][i] += pe_outputs[i][processing_counter-pe_delay];
+                        else
+                            out_buffer[1][processing_counter-pe_delay][i] = pe_outputs[i][processing_counter-pe_delay];
+                    end
+                processing_counter++;
+            end else begin
+                lhs_valid = 0;
+                out_buffer_counter++;
+                if (out_buffer_counter == 1 && lhs_os) out_ready <= 0;
+                else out_ready <= 1;
+            end
         end
+    end
+
+    always_ff @(posedge out_ready) begin
+        //Deal with consecutive lhs_os. In this case, out_buffer[0] should stay stationary without moving to out_buffer[1].
+        if (!lhs_os) begin
+            for (int i = 0; i < `N; i++)
+                for (int j = 0; j < `N; j++)
+                    out_buffer[0][i][j] <= out_buffer[1][i][j];
+        end
+        out_buffer_counter--;
     end
 
 
     //Output Buffer Logic
+    logic output_valid;
+    assign output_valid = out_start || output_valid;
     always_ff @(posedge clock or posedge reset or posedge out_ready) begin
-        if (current_state != OUTPUT) begin
-            out_ready = 0;
-            output_done <= 0;
-            output_counter <= 0;
+        if (!output_valid) begin
+            output_counter = 0;
         end else begin
             for (int block = 0; block < 4; block++)
                 for (int col = 0; col < `N; col++)
-                    assign out_data[block][col] = out_buffer[block][col];
-
-            if (output_counter < (`N/4) - 1) output_counter <= output_counter + 1;
-            else output_done <= 1;
+                    out_data[block][col] <= out_buffer[1][block][col];
+            output_counter++;
+            if (output_counter == (`N/4)) begin
+                output_valid = 0;
+                out_ready <= 0;
+            end
         end
     end
 
-    // Control signals
-    assign rhs_ready = (current_state == IDLE);
-    assign lhs_ready_ns = (current_state == PROCESSING);
-
-    // Not implemented yet
-    assign lhs_ready_ws = 0;
-    assign lhs_ready_os = 0;
-    assign lhs_ready_wos = 0;
+    assign lhs_ready_wos = (lhs_ready_os & lhs_ready_ws);
+    assign lhs_ready_ns = (rhs_buffer_counter > 0);
+    assign lhs_ready_ws = lhs_ready_ns;
+    assign lhs_ready_os = lhs_ready_ns;
 
 endmodule

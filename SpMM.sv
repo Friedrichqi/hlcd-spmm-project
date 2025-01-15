@@ -393,6 +393,675 @@ endmodule
 
 module SpMM(
     input   logic               clock,
+                                reset,
+    output  logic               lhs_ready_ns,
+                                lhs_ready_ws,
+                                lhs_ready_os,
+                                lhs_ready_wos,
+    input   logic               lhs_start,
+                                lhs_ws,
+                                lhs_os,
+    input   logic [`dbLgN-1:0]  lhs_ptr [`N-1:0],
+    input   logic [`lgN-1:0]    lhs_col [`N-1:0],
+    input   data_t              lhs_data[`N-1:0],
+    output  logic               rhs_ready,
+    input   logic               rhs_start,
+    input   data_t              rhs_data [3:0][`N-1:0],
+    output  logic               out_ready,
+    input   logic               out_start,
+    output  data_t              out_data [3:0][`N-1:0],
+    output  int                 num_el
+);
+    assign num_el = `N;
+
+    // Input Part
+    data_t rhs_buffer [1:0][`N-1:0][`N-1:0]; // RHS buffer - stores full NxN matrix
+    logic [$clog2(`N/4)-1:0] rhs_block_counter; // Counter for blocks of 4 rows during RHS loading progress
+    logic [1:0] rhs_buffer_counter;
+    logic rhs_transfer_done; // Flag to indicate when RHS loading is done and transfered to processing buffer
+    
+    typedef enum logic [1:0] {
+        RHS_IDLE,
+        RHS_LOAD,
+        RHS_TRANSFER
+    } rhs_state_t;
+    rhs_state_t rhs_state, rhs_state_next;
+
+    // Next-state logic
+    always_comb begin
+        rhs_state_next = rhs_state;
+        rhs_ready      = 0;
+        case (rhs_state)
+            RHS_IDLE: begin
+                rhs_ready      = 1;
+                if (rhs_start) rhs_state_next = RHS_LOAD;
+            end
+
+            RHS_LOAD: begin
+                rhs_ready = 0;
+                if (rhs_block_counter == (`N/4)) begin
+                    rhs_state_next = RHS_IDLE;
+                end
+            end
+
+            RHS_TRANSFER: begin
+                rhs_state_next = RHS_IDLE;
+            end
+        endcase
+    end
+
+    // Data‐path for reading 4 rows at a time
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            rhs_state           <= RHS_IDLE;
+            rhs_block_counter   <= 0;
+            rhs_buffer_counter  <= 0;
+            rhs_transfer_done   = 0;
+        end else begin
+            case (rhs_state)
+                RHS_IDLE: begin
+                    rhs_block_counter   <= 0;
+                    rhs_transfer_done   = 0;
+                end
+
+                RHS_LOAD: begin
+                    for (int i = 0; i < 4; i++)
+                        for (int j = 0; j < `N; j++)
+                            rhs_buffer[1][j][rhs_block_counter * 4 + i] <= rhs_data[i][j];
+                    
+                    if (rhs_block_counter < (`N/4)) rhs_block_counter <= rhs_block_counter + 1;
+                    else begin
+                        rhs_buffer_counter <= rhs_buffer_counter + 1;
+                        if (rhs_buffer_counter < 1) begin
+                            for (int i = 0; i < `N; i++)
+                                for (int j = 0; j < `N; j++)
+                                    rhs_buffer[0][i][j] <= rhs_buffer[1][i][j];
+                        end
+                    end
+                end
+            endcase
+            
+            rhs_state <= rhs_state_next;
+        end
+    end
+
+
+    //Processing Part
+    logic [$clog2(`N):0] processing_counter; // Counter for processing time, deciding when to output
+    int pe_delay;
+    data_t pe_outputs [`N-1:0][`N-1:0]; // PE Output buffers
+
+    // Output Part
+    logic [$clog2(`N/4)-1:0] output_block_counter; // Counter for blocks of 4 rows during output progress
+    data_t out_buffer [1:0][`N-1:0][`N-1:0]; // Output buffer
+    logic [1:0] out_buffer_counter;
+    logic out_transfer_done; // Flag to indicate when output buffer is ready to be sent out
+
+    typedef enum logic [1:0] {
+        LHS_IDLE,
+        LHS_PROCESS
+    } lhs_state_t;
+    lhs_state_t lhs_state, lhs_state_next;
+
+    assign lhs_ready_ws = lhs_ready_ns;
+    always_comb begin
+        lhs_state_next = lhs_state;
+        case (lhs_state)
+            LHS_IDLE: begin
+                if (lhs_start) lhs_state_next = LHS_PROCESS;
+                lhs_ready_ns = (rhs_buffer_counter > 0);
+            end
+
+            LHS_PROCESS: begin
+                lhs_ready_ns = 0;
+                if (processing_counter == (`N-1 + pe_delay)) lhs_state_next = LHS_IDLE;
+            end
+        endcase
+    end
+
+    // Actual multiply logic + writing to out_buffer
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            lhs_state           <= LHS_IDLE;
+            processing_counter  = 0;
+            for (int i = 0; i < `N; i++)
+                for (int j = 0; j < `N; j++)
+                    pe_outputs[i][j] <= 0;
+        end else begin
+            case (lhs_state)
+                LHS_IDLE: begin
+                    processing_counter = 0;
+                end
+
+                LHS_PROCESS: begin
+                    // For each cycle, feed part of LHS and the selected RHS buffer into the PEs
+                    if (processing_counter == `N-1) begin
+                        if (!lhs_ws) begin
+                            for (int i = 0; i < `N; i++)
+                                for (int j = 0; j < `N; j++)
+                                    rhs_buffer[0][i][j] <= rhs_buffer[1][i][j];
+                            for (int i = 0; i < `N; i++)
+                                for (int j = 0; j < `N; j++)
+                                    rhs_buffer[1][i][j] <= 0;
+                            rhs_buffer_counter <= rhs_buffer_counter - 1;
+                        end
+                    end
+
+                    if (processing_counter < (`N-1 + pe_delay)) begin
+                        processing_counter++;
+                        if (processing_counter >= pe_delay) begin
+                            int out_row = processing_counter - pe_delay;
+                            for (int col = 0; col < `N; col++) begin
+                                if (lhs_os) begin
+                                    out_buffer[1][out_row][col] <= out_buffer[1][out_row][col] + pe_outputs[col][out_row];
+                                end
+                                else begin
+                                    out_buffer[1][out_row][col] <= pe_outputs[col][out_row];
+                                end
+                            end
+                        end
+                    end else out_buffer_counter <= out_buffer_counter + 1; 
+                end
+            endcase
+
+            lhs_state <= lhs_state_next;
+        end
+    end
+
+    // PE array instantiation - N PEs, each processing one column
+    genvar i;
+    generate
+        for (i = 0; i < `N; i++) begin : pe_array
+            PE pe_inst (
+                .clock(clock),
+                .reset(reset),
+                .lhs_start(lhs_start),
+                .lhs_ptr(lhs_ptr),
+                .lhs_col(lhs_col),
+                .lhs_data(lhs_data),
+                .rhs(rhs_buffer[0][i]),
+                .out(pe_outputs[i]),
+                .delay(pe_delay),
+                .num_el()
+            );
+        end
+    endgenerate
+
+    // Output buffer logic
+    typedef enum logic [1:0] {
+        OUT_IDLE,
+        OUT_TRANSFER,
+        OUT_SEND
+    } out_state_t;
+    out_state_t out_state, out_state_next;
+
+    always_comb begin
+        out_state_next = out_state;
+        case (out_state)
+            OUT_IDLE: begin
+                if (out_buffer_counter > 0 && !lhs_os) begin
+                    out_state_next = OUT_TRANSFER;
+                end
+            end
+
+            OUT_TRANSFER: begin
+                if (out_transfer_done) begin
+                    out_state_next = OUT_SEND;
+                end
+            end
+
+
+            OUT_SEND: begin
+                if (output_block_counter == (`N/4)) begin
+                    out_state_next = OUT_IDLE;
+                end
+            end
+        endcase
+    end
+
+    // Sending out 4 rows at a time from the chosen out_buffer
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            out_state               <= OUT_IDLE;
+            out_ready               <= 1'b0;
+            output_block_counter    = '0;
+        end else begin
+            case (out_state)
+                OUT_IDLE: begin
+                    output_block_counter = '0;
+                end
+
+                OUT_TRANSFER: begin
+                    if (!lhs_os) begin
+                        for (int i = 0; i < `N; i++)
+                            for (int j = 0; j < `N; j++)
+                                out_buffer[0][i][j] <= out_buffer[1][i][j];
+                        for (int i = 0; i < `N; i++)
+                            for (int j = 0; j < `N; j++)
+                                out_buffer[1][i][j] <= 0;
+                        out_state_next = OUT_SEND;
+                    end
+                end
+
+
+
+                OUT_SEND: begin
+                    out_ready <= 1;
+                    for (int row = 0; row < 4; row++) begin
+                        for (int col = 0; col < `N; col++) begin
+                            out_data[row][col] = out_buffer[0][output_block_counter*4 + row][col];
+                        end
+                    end
+                    output_block_counter++;
+                    
+                    // Once done with all N/4 blocks, flip the buffer if we are not in output‐stationary mode
+                    if (output_block_counter == (`N/4)) begin
+                        out_buffer_counter <= out_buffer_counter - 1;
+                    end
+                end
+            endcase
+
+            out_state <= out_state_next;
+        end
+    end
+
+    assign lhs_ready_wos = lhs_ready_os;
+
+endmodule
+
+module SpMM1(
+    input   logic               clock,
+                                reset,
+    // LHS readiness outputs under various stationaries
+    output  logic               lhs_ready_ns,
+                                lhs_ready_ws,
+                                lhs_ready_os,
+                                lhs_ready_wos,
+    input   logic               lhs_start,
+                                lhs_ws,       // weight-stationary?
+                                lhs_os,       // output-stationary?
+    input   logic [`dbLgN-1:0]  lhs_ptr [`N-1:0],
+    input   logic [`lgN-1:0]    lhs_col [`N-1:0],
+    input   data_t              lhs_data [`N-1:0],
+
+    // RHS interface
+    output  logic               rhs_ready,
+    input   logic               rhs_start,
+    input   data_t              rhs_data [3:0][`N-1:0],
+
+    // Output interface
+    output  logic               out_ready,
+    input   logic               out_start,
+    output  data_t              out_data [3:0][`N-1:0],
+
+    // Utility
+    output  int                 num_el
+);
+
+    //-----------------------------------------------------
+    // 1) Always assign num_el = N
+    //-----------------------------------------------------
+    assign num_el = `N;
+
+    //-----------------------------------------------------
+    // 2) RHS Input Part
+    //-----------------------------------------------------
+    // - We'll read 4 rows at a time into an NxN buffer
+    // - Then we decide when to transfer that buffer for use
+    //-----------------------------------------------------
+    data_t rhs_buffer [1:0][`N-1:0][`N-1:0];   // Stores full NxN matrix (two buffers)
+    logic [$clog2(`N/4)-1:0] rhs_block_counter; 
+    logic [1:0] rhs_buffer_counter;
+    logic rhs_transfer_done;    
+
+    typedef enum logic [1:0] {
+        RHS_IDLE,
+        RHS_LOAD,
+        RHS_TRANSFER
+    } rhs_state_t;
+    rhs_state_t rhs_state, rhs_state_next;
+
+    // Next-state (combinational) logic for RHS
+    always_comb begin
+        rhs_state_next = rhs_state;  // default
+        rhs_ready      = 1'b0;       // default
+
+        case (rhs_state)
+            // Idle: Wait for start signal
+            RHS_IDLE: begin
+                rhs_ready = 1'b1;
+                if (rhs_start) begin
+                    rhs_state_next = RHS_LOAD;
+                end
+            end
+
+            // Load: Counting up through N/4 blocks
+            RHS_LOAD: begin
+                rhs_ready = 1'b0;
+                // Once we’ve loaded N/4 blocks of 4 rows each => done
+                if (rhs_block_counter == ( `N/4 )) begin
+                    // Instead of going to TRANSFER, the snippet goes back to IDLE
+                    // (One-cycle transfer can be done, or we can simply rely on the logic below.)
+                    rhs_state_next = RHS_IDLE;
+                end
+            end
+
+            // Transfer (in this snippet, we unconditionally go to IDLE on next cycle)
+            RHS_TRANSFER: begin
+                rhs_state_next = RHS_IDLE;
+            end
+        endcase
+    end
+
+    // Sequential logic for RHS
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            rhs_state         <= RHS_IDLE;
+            rhs_block_counter <= 0;
+            rhs_buffer_counter <= 0;
+            rhs_transfer_done = 0;
+        end
+        else begin
+            case (rhs_state)
+                // IDLE: Reset counters and “done” signals
+                RHS_IDLE: begin
+                    rhs_block_counter <= 0;
+                    rhs_transfer_done = 0;
+                end
+
+                // LOAD: For each of 4 rows, store into rhs_buffer[1]
+                RHS_LOAD: begin
+                    // Write the 4 input rows into the NxN buffer
+                    for (int i = 0; i < 4; i++) begin
+                        for (int j = 0; j < `N; j++) begin
+                            rhs_buffer[1][j][ rhs_block_counter * 4 + i ] <= rhs_data[i][j];
+                        end
+                    end
+
+                    // Increment the “4-row block” counter
+                    if (rhs_block_counter < ( `N/4 )) begin
+                        rhs_block_counter <= rhs_block_counter + 1;
+                    end
+                    else begin
+                        // Once we've reached or passed N/4 blocks,
+                        // we consider we have a “full” buffer
+                        rhs_buffer_counter <= rhs_buffer_counter + 1;
+
+                        // If this is the first full buffer, we can copy it to [0] right away
+                        // (Unless you want to do a separate transfer state.)
+                        if (rhs_buffer_counter < 1) begin
+                            for (int i = 0; i < `N; i++) begin
+                                for (int j = 0; j < `N; j++) begin
+                                    rhs_buffer[0][i][j] <= rhs_buffer[1][i][j];
+                                end
+                            end
+                        end
+                    end
+                end
+
+                RHS_TRANSFER: begin
+                    // In your snippet, you do a single-cycle transfer here (if needed).
+                    // Then we set “done” and/or go back to IDLE. 
+                    rhs_transfer_done = 1'b1;
+                end
+            endcase
+
+            rhs_state <= rhs_state_next;  // Update state
+        end
+    end
+
+    //-----------------------------------------------------
+    // 3) Processing Part
+    //-----------------------------------------------------
+    // - We track a processing_counter to feed the PE array
+    // - If not weight-stationary (lhs_ws == 0), we can update the buffer
+    //-----------------------------------------------------
+    logic [$clog2(`N):0] processing_counter;
+    int  pe_delay;
+    data_t pe_outputs [`N-1:0][`N-1:0];
+
+    //-----------------------------------------------------
+    // 4) Output Part 
+    //-----------------------------------------------------
+    // - We keep a 2-buffer out_buffer, increment out_buffer_counter
+    // - We have a separate FSM for output
+    //-----------------------------------------------------
+    logic [$clog2(`N/4)-1:0] output_block_counter;
+    data_t out_buffer [1:0][`N-1:0][`N-1:0];
+    logic [1:0] out_buffer_counter;
+    logic out_transfer_done;
+
+    //-----------------------------------------------------
+    // 5) LHS State Machine
+    //-----------------------------------------------------
+    //   LHS_IDLE    => wait for start & make sure a valid RHS buffer is available
+    //   LHS_PROCESS => feed data to PEs for N cycles + some pe_delay, produce outputs
+    //-----------------------------------------------------
+    typedef enum logic [1:0] {
+        LHS_IDLE,
+        LHS_PROCESS
+    } lhs_state_t;
+    lhs_state_t lhs_state, lhs_state_next;
+
+    // Use lhs_ready_ns to signal when we are ready (tie ws, os, wos to it)
+    assign lhs_ready_ws  = lhs_ready_ns;
+    assign lhs_ready_os  = lhs_ready_ns;
+    assign lhs_ready_wos = lhs_ready_ns;
+
+    // Combinational next-state logic for LHS
+    always_comb begin
+        lhs_state_next = lhs_state;
+        // Default assignment
+        lhs_ready_ns = 1'b0;
+
+        case (lhs_state)
+            LHS_IDLE: begin
+                // We are “ready” only if we have a valid buffer
+                lhs_ready_ns = (rhs_buffer_counter > 0);
+                // If we get lhs_start, go to LHS_PROCESS
+                if (lhs_start) begin
+                    lhs_state_next = LHS_PROCESS;
+                end
+            end
+
+            LHS_PROCESS: begin
+                lhs_ready_ns = 1'b0;
+                // Once we finish the necessary cycles, go back to IDLE
+                if (processing_counter == (`N - 1 + pe_delay)) begin
+                    lhs_state_next = LHS_IDLE;
+                end
+            end
+        endcase
+    end
+
+    // Sequential block for LHS
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            lhs_state          <= LHS_IDLE;
+            processing_counter <= 0;
+            // Initialize PEs’ output
+            for (int i = 0; i < `N; i++) begin
+                for (int j = 0; j < `N; j++) begin
+                    pe_outputs[i][j] <= 0;
+                end
+            end
+        end
+        else begin
+            case (lhs_state)
+                LHS_IDLE: begin
+                    // Prepare to do next multiplication
+                    processing_counter <= 0;
+                end
+
+                LHS_PROCESS: begin
+                    // Each cycle, we are “accumulating” or “streaming” data into the PE
+                    if (processing_counter == (`N - 1)) begin
+                        // If not weight-stationary, we shift the front buffer
+                        if (!lhs_ws) begin
+                            // Move buffer[1] => buffer[0]
+                            for (int i = 0; i < `N; i++) begin
+                                for (int j = 0; j < `N; j++) begin
+                                    rhs_buffer[0][i][j] <= rhs_buffer[1][i][j];
+                                    rhs_buffer[1][i][j] <= 0;
+                                end
+                            end
+                            rhs_buffer_counter <= rhs_buffer_counter - 1;
+                        end
+                    end
+
+                    // Keep counting up until N-1 + pe_delay
+                    if (processing_counter < (`N - 1 + pe_delay)) begin
+                        processing_counter <= processing_counter + 1;
+
+                        // Once we pass the “delay” offset, start storing PE outputs
+                        if (processing_counter >= pe_delay) begin
+                            int out_row = processing_counter - pe_delay;
+                            // Write partial sums into out_buffer[1]
+                            for (int col = 0; col < `N; col++) begin
+                                if (lhs_os) begin
+                                    // Accumulate in out_buffer[1] if in output-stationary mode
+                                    out_buffer[1][out_row][col] 
+                                        <= out_buffer[1][out_row][col] + pe_outputs[col][out_row];
+                                end
+                                else begin
+                                    // Otherwise, overwrite
+                                    out_buffer[1][out_row][col] 
+                                        <= pe_outputs[col][out_row];
+                                end
+                            end
+                        end
+                    end
+                    else begin
+                        // Once we exceed that total, bump out_buffer_counter
+                        out_buffer_counter <= out_buffer_counter + 1;
+                    end
+                end
+            endcase
+
+            lhs_state <= lhs_state_next;
+        end
+    end
+
+    //-----------------------------------------------------
+    // 6) PE Array Instantiation
+    //-----------------------------------------------------
+    //   We have N PEs, each handles one column
+    //-----------------------------------------------------
+    genvar gi;
+    generate
+        for (gi = 0; gi < `N; gi++) begin : pe_array
+            PE pe_inst (
+                .clock    (clock),
+                .reset    (reset),
+                .lhs_start(lhs_start),
+                .lhs_ptr  (lhs_ptr),
+                .lhs_col  (lhs_col),
+                .lhs_data (lhs_data),
+                .rhs      (rhs_buffer[0][gi]),
+                .out      (pe_outputs[gi]),
+                .delay    (pe_delay),
+                .num_el   (/* not used or wired out */)
+            );
+        end
+    endgenerate
+
+    //-----------------------------------------------------
+    // 7) Output Buffer Logic
+    //-----------------------------------------------------
+    typedef enum logic [1:0] {
+        OUT_IDLE,
+        OUT_TRANSFER,
+        OUT_SEND
+    } out_state_t;
+    out_state_t out_state, out_state_next;
+
+    // Combinational next-state logic for output
+    always_comb begin
+        out_state_next = out_state;
+        case (out_state)
+            OUT_IDLE: begin
+                // If we have something in out_buffer_counter
+                // and we’re not in output-stationary mode,
+                // we do a “transfer” from [1] => [0] for final output read
+                if (out_buffer_counter > 0 && !lhs_os) begin
+                    out_state_next = OUT_TRANSFER;
+                end
+            end
+
+            OUT_TRANSFER: begin
+                // One cycle to copy from out_buffer[1] => out_buffer[0]
+                // Then we can go to SEND
+                if (out_transfer_done) begin
+                    out_state_next = OUT_SEND;
+                end
+            end
+
+            OUT_SEND: begin
+                // Output 4 rows at a time
+                if (output_block_counter == (`N/4)) begin
+                    out_state_next = OUT_IDLE;
+                end
+            end
+        endcase
+    end
+
+    // Sequential logic for output
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            out_state            <= OUT_IDLE;
+            out_ready            <= 1'b0;
+            output_block_counter <= '0;
+            out_transfer_done    <= 1'b0;
+        end
+        else begin
+            case (out_state)
+                OUT_IDLE: begin
+                    // Reset the row-block counter
+                    output_block_counter <= '0;
+                    out_transfer_done    <= 1'b0;
+                end
+
+                OUT_TRANSFER: begin
+                    // Perform the actual copy from buffer[1] => buffer[0]
+                    // Then set out_transfer_done so we move on next cycle
+                    if (!lhs_os) begin
+                        for (int i = 0; i < `N; i++) begin
+                            for (int j = 0; j < `N; j++) begin
+                                out_buffer[0][i][j] <= out_buffer[1][i][j];
+                                out_buffer[1][i][j] <= 0;
+                            end
+                        end
+                        out_transfer_done <= 1'b1;
+                    end
+                end
+
+                OUT_SEND: begin
+                    out_ready <= 1'b1;
+                    // Send out 4 rows at a time from out_buffer[0]
+                    for (int row = 0; row < 4; row++) begin
+                        for (int col = 0; col < `N; col++) begin
+                            out_data[row][col] 
+                                <= out_buffer[0][(output_block_counter * 4) + row][col];
+                        end
+                    end
+
+                    output_block_counter <= output_block_counter + 1;
+
+                    // Once we’ve sent all N/4 blocks, decrement out_buffer_counter
+                    if (output_block_counter == ( `N/4 )) begin
+                        out_buffer_counter <= out_buffer_counter - 1;
+                    end
+                end
+            endcase
+
+            out_state <= out_state_next;
+        end
+    end
+
+endmodule
+
+module SpMM0(
+    input   logic               clock,
                                reset,
     output  logic               lhs_ready_ns,
                                lhs_ready_ws,
