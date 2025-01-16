@@ -193,6 +193,19 @@ module RedUnit(
     //out_data_register 表示FAN network中最后一行的输出数据转换成prefix结构的输出数据
     data_t out_data_register[`N-1:0];
     int flag = 0;
+
+    // //给信号加buffer
+    // generate
+    //     for (genvar level = 0; level < NUM_LEVELS ; level++ ) begin
+    //         always_ff @(posedge clock) begin
+    //             if(reset) begin
+                    
+    //             end
+    //         end
+    //     end
+    // endgenerate
+
+
     generate
         for (genvar level = 0; level < NUM_LEVELS; level++) begin : gen_level
             localparam step = 2 << level;
@@ -272,30 +285,44 @@ module RedUnit(
                                 if (split_register[level][i]) begin
                                     out_data_register[i] = fan_register[level][fan_out_idx_register[level][vecID[level][i]]];
                                     if (vecID[level][i] == 0) out_data_register[i] += halo_in;
+                                    
                                 end
+                                if (!split_register[level][`N-1]) begin
+                                    halo_out = fan_register[level][fan_out_idx_register[level][vecID[level][`N-1]]];
+                                end else halo_out = 0;
                             end
                             for (int i = out_scale_register[level][0]; i <= out_scale_register[level][1]; i++)
                                 if (!zero_register[level][i])
                                     out_data[i] = out_data_register[out_idx_register[level][i]];
                                 else out_data[i] = 0;
-                            flag = 0;
-                            for (int i = 0; i < `N; ++i)
-                                if (split_register[level][i]) begin
-                                    flag = 1;
-                                    break;
-                                end
-                            if (flag && !split_register[level][`N-1]) begin
-                                //halo_out = fan_register[level][fan_out_idx_register[level][vecID[level][`N-1]]];
-                                halo_out = 0;
-                            end else halo_out = 0;
+                            // flag = 0;
+                            // for (int i = 0; i < `N; ++i)
+                            //     if (split_register[level][i]) begin
+                            //         flag = 1;
+                            //         break;
+                            //     end
+                            // if (flag && !split_register[level][`N-1]) begin
+                            //     halo_out = fan_register[level][fan_out_idx_register[level][vecID[level][`N-1]]];
+                            //     //halo_out = 0;
+                            // end else halo_out = 0;
                         end
+
                     end
                 end
             end
         end
     endgenerate
+
+    // assign halo_out = (|split_register[NUM_LEVELS] && !split_register[NUM_LEVELS][`N-1]) ? fan_data[NUM_LEVELS][fan_out_idx[NUM_LEVELS][vecID[NUM_LEVELS][`N-1]]] : 0;
+
     assign num_el = `N;
     assign delay = NUM_LEVELS;
+
+    logic split_register_dummy[`N-1:0];
+    generate
+        for (genvar i = 0; i < `N; ++i)
+            assign split_register_dummy[i] = split_register[NUM_LEVELS][i];
+    endgenerate
 
 endmodule
 
@@ -388,9 +415,11 @@ module PE(
     data_t out_buffer[`N-1:0];
     
     data_t halo_in, halo_out;
-    // Question: why negedge clock?
-    always_ff @(negedge clock or posedge reset) begin
-        if (reset) halo_in <= 0;
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            halo_in <= 0;
+            halo_out = 0;
+        end
         else halo_in <= halo_out;
     end
 
