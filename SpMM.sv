@@ -629,8 +629,9 @@ module SpMM(
 
                 OUT_RECEIVING: begin
                     output_receiving_counter <= output_receiving_counter + 1;
-                    for (int col = 0; col < `N; col++)
-                        out_buffer[1][output_receiving_counter][col] <= pe_outputs[col][output_receiving_counter];
+                    for (int row = 0; row < `N; row ++)
+                        for (int col = 0; col < `N; col++)
+                            out_buffer[1][row][col] <= pe_outputs[col][row];
                     if (output_receiving_counter == `N) begin
                         output_buffer_counter++;
                         if (!output_stationary || output_buffer_counter == 1) begin
@@ -647,7 +648,6 @@ module SpMM(
                             out_valid <= (!output_stationary);
                         end
                         
-
                         output_receiving_counter <= 0;
                     end
                 end
@@ -667,7 +667,7 @@ module SpMM(
 
                 for (int row = 0; row < 4; row++) begin
                     for (int col = 0; col < `N; col++) begin
-                        out_data[row][col] = out_buffer[0][output_receiving_counter*4 + row][col];
+                        out_data[row][col] = out_buffer[0][output_block_counter*4 + row][col];
                     end
                 end
                 output_block_counter++;
