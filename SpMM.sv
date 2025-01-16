@@ -84,6 +84,7 @@ module RedUnit(
     input   logic               zero[`N-1:0],
     input   logic [`lgN-1:0]    out_scale[2]
 );
+    data_t              out_data_dummy[`N-1:0];
     localparam NUM_LEVELS = $clog2(`N);
     //vecID 表示这一组待累加的数据属于第几行
     logic [NUM_LEVELS:0] vecID [NUM_LEVELS:0][`N-1:0];
@@ -276,6 +277,7 @@ module RedUnit(
                             for (int i = out_scale_register[level][0]; i <= out_scale_register[level][1]; i++)
                                 if (!zero_register[level][i])
                                     out_data[i] = out_data_register[out_idx_register[level][i]];
+                                else out_data[i] = 0;
                             flag = 0;
                             for (int i = 0; i < `N; ++i)
                                 if (split_register[level][i]) begin
@@ -283,8 +285,8 @@ module RedUnit(
                                     break;
                                 end
                             if (flag && !split_register[level][`N-1]) begin
-                                halo_out = fan_register[level][fan_out_idx_register[level][vecID[level][`N-1]]];
-                                //halo_out = 0;
+                                //halo_out = fan_register[level][fan_out_idx_register[level][vecID[level][`N-1]]];
+                                halo_out = 0;
                             end else halo_out = 0;
                         end
                     end
@@ -292,8 +294,6 @@ module RedUnit(
             end
         end
     endgenerate
-
-
     assign num_el = `N;
     assign delay = NUM_LEVELS;
 
@@ -386,6 +386,7 @@ module PE(
 
     int red_delay;
     data_t out_buffer[`N-1:0];
+    
     data_t halo_in, halo_out;
     // Question: why negedge clock?
     always_ff @(negedge clock or posedge reset) begin
