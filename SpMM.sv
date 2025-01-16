@@ -81,7 +81,8 @@ module RedUnit(
     output  int                 num_el,
     output  data_t              halo_out,
     input   data_t              halo_in,
-    input   logic               zero[`N-1:0]
+    input   logic               zero[`N-1:0],
+    input   logic [`lgN-1:0]    out_scale[2]
 );
     localparam NUM_LEVELS = $clog2(`N);
     //vecID 表示这一组待累加的数据属于第几行
@@ -96,6 +97,7 @@ module RedUnit(
     //out_idx_register 表示FAN network最后一行数据的输出位置
     logic [`lgN-1:0] out_idx_register[NUM_LEVELS:0][`N-1:0];
     logic zero_register[NUM_LEVELS:0][`N-1:0];
+    logic [`lgN-1:0] out_scale_register[NUM_LEVELS:0][2];
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
             for (int i = 0; i < `N; i++) begin
@@ -109,9 +111,12 @@ module RedUnit(
                 out_idx_register[0][i] = 0;
                 zero_register[0][i] = 0;
             end
+            out_scale_register[0][0] = 0;
+            out_scale_register[0][1] = 0;
         end else begin
             split_register[0] = split;
             out_idx_register[0] = out_idx;
+            out_scale_register[0] = out_scale;
             zero_register[0] = zero;
             for (int i = 1; i < `N; i++) vecID[0][i] = split[i - 1] ? vecID[0][i - 1] + 1 : vecID[0][i - 1];
             
@@ -178,6 +183,8 @@ module RedUnit(
                         out_idx_register[level+1][i] <= 0;
                         zero_register[level+1][i] <= 0;
                     end
+                    out_scale_register[level+1][0] <= 0;
+                    out_scale_register[level+1][1] <= 0;
                 end else begin
                     if (level == 0) begin
                         for (int i = 0; i < `N; i += step) begin
@@ -202,6 +209,7 @@ module RedUnit(
                             left_sel[level+1][i] <= left_sel[level][i];
                             right_sel[level+1][i] <= right_sel[level][i];
                         end
+                        out_scale_register[level+1] <= out_scale_register[level];
                     end
                     else begin
                         for (int i = 0; i < `N; i++) begin
@@ -230,6 +238,7 @@ module RedUnit(
                             left_sel[level+1][i] <= left_sel[level][i];
                             right_sel[level+1][i] <= right_sel[level][i];
                         end
+                        out_scale_register[level+1] <= out_scale_register[level];
 
                         if (level == NUM_LEVELS-1) begin
                             for (int i = 0; i < `N; i++) begin
@@ -238,9 +247,8 @@ module RedUnit(
                                     out_data_register[i] = fan_register[level][fan_out_idx_register[level][vecID[level][i]]];
                                     if (vecID[level][i] == 0) out_data_register[i] += halo_in;
                                 end
-                                //else out_data_register[i] = level;
                             end
-                            for (int i = 0; i < `N; i++)
+                            for (int i = out_scale_register[level][0]; i <= out_scale_register[level][1]; i++)
                                 if (!zero_register[level][i])
                                     out_data[i] = out_data_register[out_idx_register[level][i]];
                             flag = 0;
@@ -251,7 +259,6 @@ module RedUnit(
                                 end
                             if (flag && !split_register[level][`N-1]) begin
                                 halo_out = fan_register[level][fan_out_idx_register[level][vecID[level][`N-1]]];
-                                //halo_out = 0;
                             end else halo_out = 0;
                         end
                     end
@@ -295,6 +302,7 @@ module PE(
     logic [`lgN-1:0] current_row_data;
     logic [`lgN-1:0] current_row_output;
     logic [`lgN-1:0] out_idx[`N-1:0];
+    logic [`lgN-1:0] out_scale[2];
     int time_counter;
     // current_row_data 记录当前data的部分和求到哪一行了
     // current_row_output 记录当前out_idx输出到哪一行了
@@ -307,8 +315,11 @@ module PE(
             current_row_output = 0;
             out_idx = '{default: 0};
             time_counter <= 0;
+            out_scale[0] = 0;
+            out_scale[1] = 0;
         end else if (valid) begin
             split = '{default: 0};
+            out_scale[0] = current_row_output;
             for (int i = 0; i < `N; ++i) begin
                 if (lhs_ptr[current_pos_ptr] >= current_row_data * `N &&
                 lhs_ptr[current_pos_ptr] < (current_row_data + 1) * `N) begin
@@ -317,6 +328,7 @@ module PE(
                     current_pos_ptr++;
                 end
             end
+            out_scale[1] = current_row_output-1;
 
             if (current_row_output == 0) valid = 0 || lhs_start;
             current_row_data++;
@@ -327,6 +339,8 @@ module PE(
             current_row_output = 0;
             out_idx = '{default: 0};
             time_counter <= 0;
+            out_scale[0] = 0;
+            out_scale[1] = 0;
         end
     end
 
@@ -375,7 +389,8 @@ module PE(
         .num_el(num_el),
         .halo_out(halo_out),
         .halo_in(halo_in),
-        .zero(zero)
+        .zero(zero),
+        .out_scale(out_scale)
     );
         
     assign delay = red_delay + 1;
