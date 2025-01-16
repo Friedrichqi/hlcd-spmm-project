@@ -291,14 +291,14 @@ module PE(
     // split 用于记录 lhs_ptr 的变化
     logic split[`N-1:0];
     logic red_split[`N-1:0];
-    logic [`lgN:0] current_pos_ptr;
-    logic [`lgN:0] current_row_data;
-    logic [`lgN:0] current_row_output;
+    logic [`lgN-1:0] current_pos_ptr;
+    logic [`lgN-1:0] current_row_data;
+    logic [`lgN-1:0] current_row_output;
     logic [`lgN-1:0] out_idx[`N-1:0];
     int time_counter;
     // current_row_data 记录当前data的部分和求到哪一行了
     // current_row_output 记录当前out_idx输出到哪一行了
-
+    logic flag = 0;
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
             split = '{default: 0};
@@ -317,10 +317,8 @@ module PE(
                     current_pos_ptr++;
                 end
             end
-            if (current_row_output == `N) begin
-                time_counter <= time_counter + 1;
-                if (time_counter == delay) valid--;
-            end
+
+            if (current_row_output == 0) valid = 0 || lhs_start;
             current_row_data++;
         end else begin
             split = '{default: 0};
@@ -352,7 +350,7 @@ module PE(
     // Question: why negedge clock?
     always_ff @(negedge clock or posedge reset) begin
         if (reset) halo_in <= 0;
-        else if (valid) halo_in <= halo_out;
+        else halo_in <= halo_out;
     end
 
     logic zero[`N-1:0];
@@ -360,9 +358,9 @@ module PE(
         out = '{default: 0};
         zero = '{default: 0};
         for (int i = 1; i < `N; ++i)
-            if (valid && lhs_ptr[i] == lhs_ptr[i - 1])
+            if (lhs_ptr[i] == lhs_ptr[i - 1])
                 zero[i] = 1;
-        for (int i = 0; i < current_row_output; i++)
+        for (int i = 0; i < `N; i++)
             out[i] = out_buffer[i];
     end
 
@@ -586,7 +584,9 @@ module SpMM(
 
             OUT_RECEIVING: begin
                 if (output_receiving_counter == `N) begin
-                    out_state_next = OUT_IDLE;
+                    if (processing_counter >= pe_delay-2) begin
+                        out_state_next = OUT_RECEIVING;
+                    end else out_state_next = OUT_IDLE;
                 end
             end
         endcase
@@ -620,6 +620,7 @@ module SpMM(
                                 for (int j = 0; j < `N; j++)
                                     out_buffer[0][i][j] <= out_buffer[1][i][j];
                         end
+                        output_receiving_counter <= 0;
                     end
                 end
             endcase
