@@ -406,7 +406,7 @@ module SpMM(
 
     // Input Part
     data_t rhs_buffer [1:0][`N-1:0][`N-1:0]; // RHS buffer - stores full NxN matrix
-    logic [$clog2(`N>>2)-1:0] rhs_block_counter; // Counter for blocks of 4 rows during RHS loading progress
+    logic [$clog2(`N>>2):0] rhs_block_counter; // Counter for blocks of 4 rows during RHS loading progress
     logic [1:0] rhs_buffer_counter;
     logic rhs_transfer_done; // Flag to indicate when RHS loading is done and transfered to processing buffer
     
@@ -560,7 +560,7 @@ module SpMM(
 
 
     // Output Part
-    logic [$clog2(`N>>2)-1:0] output_block_counter; // Counter for blocks of 4 rows during output progress
+    logic [$clog2(`N>>2):0] output_block_counter; // Counter for blocks of 4 rows during output progress
     data_t out_buffer [1:0][`N-1:0][`N-1:0]; // Output buffer
     logic [$clog2(`N):0] output_receiving_counter;
     logic output_stationary;
