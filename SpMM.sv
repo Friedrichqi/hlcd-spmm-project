@@ -84,7 +84,6 @@ module RedUnit(
     input   logic               zero[`N-1:0],
     input   logic [`lgN-1:0]    out_scale[2]
 );
-    data_t              out_data_dummy[`N-1:0];
     localparam NUM_LEVELS = $clog2(`N);
     //vecID 表示这一组待累加的数据属于第几行
     logic [NUM_LEVELS:0] vecID [NUM_LEVELS:0][`N-1:0];
@@ -92,24 +91,6 @@ module RedUnit(
     logic add_En[NUM_LEVELS:0][`N-1:0];
     logic bypass_En[NUM_LEVELS:0][`N-1:0];
     logic [NUM_LEVELS:0] left_sel[NUM_LEVELS:0][`N-1:0];
-    logic [NUM_LEVELS:0] vecid[`N-1:0];
-    generate
-        for(genvar i = 0; i < `N-1; i ++)
-            assign vecid[i] = vecID[0][i];
-    endgenerate
-    generate
-        for(genvar i = 0; i < `N-1; i ++)begin
-            wire addEn_probe;
-            assign addEn_probe = add_En[0][i];
-            wire bypassEn_probe;
-            assign bypassEn_probe = bypass_En[0][i];
-            wire [NUM_LEVELS:0] lsel;
-            assign lsel = left_sel[0][i];
-            wire [NUM_LEVELS:0] rsel;
-            assign rsel = right_sel[0][i];
-
-        end
-    endgenerate
     logic [NUM_LEVELS:0] right_sel[NUM_LEVELS:0][`N-1:0];
     //split_register 表示FAN network最后一行数据是否需要分裂
     logic split_register [NUM_LEVELS:0][`N-1:0];
@@ -179,12 +160,6 @@ module RedUnit(
     data_t fan_data[NUM_LEVELS:0][`N-1:0];
     //fan_register 表示FAN network中上一行处理完的数据（输出），作为下一行的输入
     data_t fan_register[NUM_LEVELS:0][`N-1:0];
-    data_t final_fan_register [`N-1:0];
-    generate
-        for (genvar i = 0  ; i < `N; i++ ) begin
-            assign final_fan_register[i] = fan_register[NUM_LEVELS-1][i];
-        end
-    endgenerate
 
     //fan_out_idx 表示这一行数据在FAN network结构中的的输出位置
     logic [NUM_LEVELS:0] fan_out_idx[NUM_LEVELS:0][`N-1:0];
@@ -194,21 +169,10 @@ module RedUnit(
     data_t out_data_register[`N-1:0];
     int flag = 0;
 
-    // //给信号加buffer
-    // generate
-    //     for (genvar level = 0; level < NUM_LEVELS ; level++ ) begin
-    //         always_ff @(posedge clock) begin
-    //             if(reset) begin
-                    
-    //             end
-    //         end
-    //     end
-    // endgenerate
-
-
     generate
         for (genvar level = 0; level < NUM_LEVELS; level++) begin : gen_level
             localparam step = 2 << level;
+            reg t;
             always_ff @(posedge clock or posedge reset) begin
                 if (reset) begin
                     for (int i = 0; i < `N; i++) begin
@@ -285,26 +249,22 @@ module RedUnit(
                                 if (split_register[level][i]) begin
                                     out_data_register[i] = fan_register[level][fan_out_idx_register[level][vecID[level][i]]];
                                     if (vecID[level][i] == 0) out_data_register[i] += halo_in;
-                                    
                                 end
-                                if (!split_register[level][`N-1]) begin
-                                    halo_out = fan_register[level][fan_out_idx_register[level][vecID[level][`N-1]]];
-                                end else halo_out = 0;
                             end
                             for (int i = out_scale_register[level][0]; i <= out_scale_register[level][1]; i++)
                                 if (!zero_register[level][i])
                                     out_data[i] = out_data_register[out_idx_register[level][i]];
                                 else out_data[i] = 0;
-                            // flag = 0;
-                            // for (int i = 0; i < `N; ++i)
-                            //     if (split_register[level][i]) begin
-                            //         flag = 1;
-                            //         break;
-                            //     end
-                            // if (flag && !split_register[level][`N-1]) begin
-                            //     halo_out = fan_register[level][fan_out_idx_register[level][vecID[level][`N-1]]];
-                            //     //halo_out = 0;
-                            // end else halo_out = 0;
+                            flag = 0;
+                            for (int i = 0; i < `N; ++i)
+                                if (split_register[level][i]) begin
+                                    flag = 1;
+                                    break;
+                                end
+                            if (flag && !split_register[level][`N-1]) begin
+                                //halo_out = fan_register[level][fan_out_idx_register[level][vecID[level][`N-1]]];
+                                halo_out = 0;
+                            end else halo_out = 0;
                         end
 
                     end
@@ -313,16 +273,8 @@ module RedUnit(
         end
     endgenerate
 
-    // assign halo_out = (|split_register[NUM_LEVELS] && !split_register[NUM_LEVELS][`N-1]) ? fan_data[NUM_LEVELS][fan_out_idx[NUM_LEVELS][vecID[NUM_LEVELS][`N-1]]] : 0;
-
     assign num_el = `N;
     assign delay = NUM_LEVELS;
-
-    logic split_register_dummy[`N-1:0];
-    generate
-        for (genvar i = 0; i < `N; ++i)
-            assign split_register_dummy[i] = split_register[NUM_LEVELS][i];
-    endgenerate
 
 endmodule
 
@@ -344,7 +296,6 @@ module PE(
 
     //State Machine
     int valid = 0;
-    //assign valid = valid || lhs_start;
     always_ff @(posedge lhs_start) valid += 1;
     
 
@@ -385,15 +336,6 @@ module PE(
 
             if (current_row_output == 0) valid = 0 || lhs_start;
             current_row_data++;
-        end else begin
-            // split = '{default: 0};
-            // current_pos_ptr = 0;
-            // current_row_data = 0;
-            // current_row_output = 0;
-            // out_idx = '{default: 0};
-            // time_counter <= 0;
-            // out_scale[0] = 0;
-            // out_scale[1] = 0;
         end
     end
 
@@ -415,10 +357,9 @@ module PE(
     data_t out_buffer[`N-1:0];
     
     data_t halo_in, halo_out;
-    always_ff @(posedge clock or posedge reset) begin
+    always_ff @(negedge clock or posedge reset) begin
         if (reset) begin
             halo_in <= 0;
-            halo_out = 0;
         end
         else halo_in <= halo_out;
     end
@@ -483,8 +424,7 @@ module SpMM(
     
     typedef enum logic [1:0] {
         RHS_IDLE,
-        RHS_LOAD,
-        RHS_TRANSFER
+        RHS_LOAD
     } rhs_state_t;
     rhs_state_t rhs_state, rhs_state_next;
 
@@ -503,10 +443,6 @@ module SpMM(
                 if (rhs_block_counter == (`N>>2)) begin
                     rhs_state_next = RHS_IDLE;
                 end
-            end
-
-            RHS_TRANSFER: begin
-                rhs_state_next = RHS_IDLE;
             end
         endcase
     end
@@ -669,16 +605,6 @@ module SpMM(
     end
 
 
-    
-    generate
-        for (genvar i = 0; i < `N; ++i) begin
-            data_t t_out[`N-1:0];
-            data_t t_out_buffer[`N-1:0];
-            for (genvar j = 0; j < `N; ++j) assign t_out[j] = pe_outputs[j][i];
-            for (genvar j = 0; j < `N; ++j) assign t_out_buffer[j] = out_buffer[1][i][j];
-        end
-    endgenerate
-
     // Sending out 4 rows at a time from the chosen out_buffer
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
@@ -701,10 +627,6 @@ module SpMM(
                             out_buffer[1][row][col] <= pe_outputs[col][row];
                     if (output_receiving_counter == `N) begin
                         output_buffer_counter++;
-                        // out_valid <= (!output_stationary);
-                        // for (int i = 0; i < `N; i++)
-                        //     for (int j = 0; j < `N; j++)
-                        //         out_buffer[0][i][j] <= out_buffer[1][i][j];
                         if (!output_stationary || output_buffer_counter == 1) begin
                             out_valid <= (!output_stationary);
                             for (int i = 0; i < `N; i++)
@@ -752,15 +674,5 @@ module SpMM(
             end
         end
     end
-
-    generate
-        for(genvar i = 0; i < `N; i++) begin
-            data_t out_dta[`N-1:0];
-            for(genvar j = 0; j < `N; j++) begin
-                assign out_dta[j] = out_buffer[0][i][j];
-            end
-        end
-
-    endgenerate
 
 endmodule
