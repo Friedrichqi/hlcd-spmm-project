@@ -80,7 +80,9 @@ module RedUnit(
     output  int                 delay,
     output  int                 num_el,
     output  data_t              halo_out,
-    input   data_t              halo_in
+    input   data_t              halo_in,
+    input   logic               zero[`N-1:0],
+    input   logic [`lgN-1:0]    out_scale[2]
 );
     localparam NUM_LEVELS = $clog2(`N);
     //vecID 表示这一组待累加的数据属于第几行
@@ -90,12 +92,12 @@ module RedUnit(
     logic bypass_En[NUM_LEVELS:0][`N-1:0];
     logic [NUM_LEVELS:0] left_sel[NUM_LEVELS:0][`N-1:0];
     logic [NUM_LEVELS:0] right_sel[NUM_LEVELS:0][`N-1:0];
-    //fan_out_idx 表示这一行数据在FAN network结构中的的输出位置
-    logic [NUM_LEVELS:0] fan_out_idx[NUM_LEVELS:0][`N-1:0];
     //split_register 表示FAN network最后一行数据是否需要分裂
     logic split_register [NUM_LEVELS:0][`N-1:0];
     //out_idx_register 表示FAN network最后一行数据的输出位置
     logic [`lgN-1:0] out_idx_register[NUM_LEVELS:0][`N-1:0];
+    logic zero_register[NUM_LEVELS:0][`N-1:0];
+    logic [`lgN-1:0] out_scale_register[NUM_LEVELS:0][2];
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
             for (int i = 0; i < `N; i++) begin
@@ -107,10 +109,15 @@ module RedUnit(
                 right_sel[0][i] = 0;
                 split_register[0][i] = 0;
                 out_idx_register[0][i] = 0;
+                zero_register[0][i] = 0;
             end
+            out_scale_register[0][0] = 0;
+            out_scale_register[0][1] = 0;
         end else begin
             split_register[0] = split;
             out_idx_register[0] = out_idx;
+            out_scale_register[0] = out_scale;
+            zero_register[0] = zero;
             for (int i = 1; i < `N; i++) vecID[0][i] = split[i - 1] ? vecID[0][i - 1] + 1 : vecID[0][i - 1];
             
             for (int i = 0; i < `N; i++) adderLvl[0][i] = 0;
@@ -153,10 +160,13 @@ module RedUnit(
     data_t fan_data[NUM_LEVELS:0][`N-1:0];
     //fan_register 表示FAN network中上一行处理完的数据（输出），作为下一行的输入
     data_t fan_register[NUM_LEVELS:0][`N-1:0];
+    //fan_out_idx 表示这一行数据在FAN network结构中的的输出位置
+    logic [NUM_LEVELS:0] fan_out_idx[NUM_LEVELS:0][`N-1:0];
     //fan_out_idx_register 表示FAN network中上一行处理完的数据的输出位置，在下一行处理完后，可能会更新到这一组数据中最深的累加器/register编号
     logic [NUM_LEVELS:0] fan_out_idx_register[NUM_LEVELS:0][`N-1:0];
     //out_data_register 表示FAN network中最后一行的输出数据转换成prefix结构的输出数据
     data_t out_data_register[`N-1:0];
+    int flag = 0;
     generate
         for (genvar level = 0; level < NUM_LEVELS; level++) begin : gen_level
             localparam step = 2 << level;
@@ -171,7 +181,10 @@ module RedUnit(
                         right_sel[level+1][i] <= 0;
                         split_register[level+1][i] <= 0;
                         out_idx_register[level+1][i] <= 0;
+                        zero_register[level+1][i] <= 0;
                     end
+                    out_scale_register[level+1][0] <= 0;
+                    out_scale_register[level+1][1] <= 0;
                 end else begin
                     if (level == 0) begin
                         for (int i = 0; i < `N; i += step) begin
@@ -186,6 +199,7 @@ module RedUnit(
                             end
                         end
                         for (int i = 0; i < `N; i++) begin
+                            zero_register[level+1][i] <= zero_register[level][i];
                             out_idx_register[level+1][i] <= out_idx_register[level][i];
                             split_register[level+1][i] <= split_register[level][i];
                             vecID[level+1][i] <= vecID[level][i];
@@ -195,6 +209,7 @@ module RedUnit(
                             left_sel[level+1][i] <= left_sel[level][i];
                             right_sel[level+1][i] <= right_sel[level][i];
                         end
+                        out_scale_register[level+1] <= out_scale_register[level];
                     end
                     else begin
                         for (int i = 0; i < `N; i++) begin
@@ -211,6 +226,7 @@ module RedUnit(
                             end
                         end
                         for (int i = 0; i < `N; i++) begin
+                            zero_register[level+1][i] <= zero_register[level][i];
                             out_idx_register[level+1][i] <= out_idx_register[level][i];
                             split_register[level+1][i] <= split_register[level][i];
                             fan_data[level+1][i] <= fan_register[level][i];
@@ -222,41 +238,34 @@ module RedUnit(
                             left_sel[level+1][i] <= left_sel[level][i];
                             right_sel[level+1][i] <= right_sel[level][i];
                         end
+                        out_scale_register[level+1] <= out_scale_register[level];
 
                         if (level == NUM_LEVELS-1) begin
                             for (int i = 0; i < `N; i++) begin
                                 out_data_register[i] = 0;
-                                if (split_register[NUM_LEVELS-1][i])
-                                    out_data_register[i] = fan_register[NUM_LEVELS-1][fan_out_idx_register[NUM_LEVELS-1][vecID[NUM_LEVELS-1][i]]];
-                                if (vecID[NUM_LEVELS-1][i] == 0) out_data_register[i] += halo_in;
+                                if (split_register[level][i]) begin
+                                    out_data_register[i] = fan_register[level][fan_out_idx_register[level][vecID[level][i]]];
+                                    if (vecID[level][i] == 0) out_data_register[i] += halo_in;
+                                end
                             end
-                            for (int i = 0; i < `N; i++) out_data[i] = out_data_register[out_idx_register[NUM_LEVELS-1][i]];
-                            if (!split_register[NUM_LEVELS-1][`N-1])
-                                halo_out = fan_register[NUM_LEVELS-1][fan_out_idx_register[NUM_LEVELS-1][vecID[NUM_LEVELS-1][`N-1]]];
-                            else halo_out = 0;
+                            for (int i = out_scale_register[level][0]; i <= out_scale_register[level][1]; i++)
+                                if (!zero_register[level][i])
+                                    out_data[i] = out_data_register[out_idx_register[level][i]];
+                            flag = 0;
+                            for (int i = 0; i < `N; ++i)
+                                if (split_register[level][i]) begin
+                                    flag = 1;
+                                    break;
+                                end
+                            if (flag && !split_register[level][`N-1]) begin
+                                halo_out = fan_register[level][fan_out_idx_register[level][vecID[level][`N-1]]];
+                            end else halo_out = 0;
                         end
                     end
                 end
             end
         end
     endgenerate
-
-    
-    /*always_ff @(posedge clock or posedge reset) begin
-        if (reset) begin
-            for (int i = 0; i < `N; i++) out_data[i] <= 0;
-        end else begin
-            for (int i = 0; i < `N; i++) begin
-                out_data_register[i] = 0;
-                if (split_register[NUM_LEVELS][i])
-                    out_data_register[i] = fan_data[NUM_LEVELS][fan_out_idx[NUM_LEVELS][vecID[NUM_LEVELS][i]]];
-                if (vecID[NUM_LEVELS][i] == 0) out_data_register[i] += halo_in;
-            end
-            for (int i = 0; i < `N; i++) out_data[i] <= out_data_register[out_idx_register[NUM_LEVELS][i]];
-            if (!split_register[NUM_LEVELS][`N-1])
-                halo_out <= fan_data[NUM_LEVELS][vecID[NUM_LEVELS][`N-1]];
-        end
-    end*/
 
 
     assign num_el = `N;
@@ -281,28 +290,23 @@ module PE(
     assign num_el = `N;
 
     //State Machine
-    logic valid = 0;
-    assign valid = lhs_start || valid;
-
+    int valid = 0;
+    //assign valid = valid || lhs_start;
+    always_ff @(posedge lhs_start) valid += 1;
+    
 
     // split 用于记录 lhs_ptr 的变化
     logic split[`N-1:0];
     logic red_split[`N-1:0];
-    logic [`lgN:0] current_pos_ptr;
-    logic [`lgN:0] current_row_data;
-    logic [`lgN:0] current_row_output;
+    logic [`lgN-1:0] current_pos_ptr;
+    logic [`lgN-1:0] current_row_data;
+    logic [`lgN-1:0] current_row_output;
     logic [`lgN-1:0] out_idx[`N-1:0];
+    logic [`lgN-1:0] out_scale[2];
+    int time_counter;
     // current_row_data 记录当前data的部分和求到哪一行了
     // current_row_output 记录当前out_idx输出到哪一行了
-
-    always_ff @(posedge clock or posedge reset) begin
-        if (reset) begin
-            red_split <= '{default: 0};
-        end else begin
-            red_split <= split;
-        end
-    end
-
+    logic flag = 0;
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
             split = '{default: 0};
@@ -310,17 +314,33 @@ module PE(
             current_row_data = 0;
             current_row_output = 0;
             out_idx = '{default: 0};
+            time_counter <= 0;
+            out_scale[0] = 0;
+            out_scale[1] = 0;
         end else if (valid) begin
             split = '{default: 0};
+            out_scale[0] = current_row_output;
             for (int i = 0; i < `N; ++i) begin
                 if (lhs_ptr[current_pos_ptr] >= current_row_data * `N &&
                 lhs_ptr[current_pos_ptr] < (current_row_data + 1) * `N) begin
                     split[lhs_ptr[current_pos_ptr] % `N] = 1;
-                    out_idx[current_row_output++] = lhs_ptr[current_pos_ptr] % `N;
+                    out_idx[current_row_output++] = (lhs_ptr[current_pos_ptr]) % `N;
                     current_pos_ptr++;
                 end
             end
+            out_scale[1] = current_row_output-1;
+
+            if (current_row_output == 0) valid = 0 || lhs_start;
             current_row_data++;
+        end else begin
+            split = '{default: 0};
+            current_pos_ptr = 0;
+            current_row_data = 0;
+            current_row_output = 0;
+            out_idx = '{default: 0};
+            time_counter <= 0;
+            out_scale[0] = 0;
+            out_scale[1] = 0;
         end
     end
 
@@ -344,39 +364,9 @@ module PE(
     // Question: why negedge clock?
     always_ff @(negedge clock or posedge reset) begin
         if (reset) halo_in <= 0;
-        else if (valid) halo_in <= halo_out;
+        else halo_in <= halo_out;
     end
 
-
-    RedUnit red_unit(
-        .clock(clock),
-        .reset(reset),
-        .data(mult_result),
-        .split(red_split),
-        .out_idx(out_idx),
-        .out_data(out_buffer),
-        .delay(red_delay),
-        .num_el(num_el),
-        .halo_out(halo_out),
-        .halo_in(halo_in)
-    );
-
-
-    //IMPORTANT: The following code can be a bug source(to be checked)
-    /*logic zero[$clog2(`N):0][`N-1:0];
-    always_ff @(posedge clock or posedge reset) begin
-        if (reset) begin
-            out = '{default: 0};
-            zero[0] = '{default: 0};
-        end else begin
-            for (int i = 0; i < $clog2(`N); i++) zero[i + 1] <= zero[i];
-            for (int i = 1; i < `N; ++i)
-                if (lhs_ptr[i] == lhs_ptr[i - 1])
-                    zero[0][i] = 1;
-            for (int i = 0; i < current_row_output; i++)
-                if (!zero[red_delay][i]) out[i] = out_buffer[i];
-        end
-    end*/
     logic zero[`N-1:0];
     always_comb begin
         out = '{default: 0};
@@ -384,23 +374,38 @@ module PE(
         for (int i = 1; i < `N; ++i)
             if (lhs_ptr[i] == lhs_ptr[i - 1])
                 zero[i] = 1;
-        for (int i = 0; i < current_row_output; i++)
-            if (!zero[i]) out[i] = out_buffer[i];
+        for (int i = 0; i < `N; i++)
+            out[i] = out_buffer[i];
     end
 
+    RedUnit red_unit(
+        .clock(clock),
+        .reset(reset),
+        .data(mult_result),
+        .split(split),
+        .out_idx(out_idx),
+        .out_data(out_buffer),
+        .delay(red_delay),
+        .num_el(num_el),
+        .halo_out(halo_out),
+        .halo_in(halo_in),
+        .zero(zero),
+        .out_scale(out_scale)
+    );
+        
     assign delay = red_delay + 1;
 endmodule
 
 module SpMM(
     input   logic               clock,
-                               reset,
+                                reset,
     output  logic               lhs_ready_ns,
-                               lhs_ready_ws,
-                               lhs_ready_os,
-                               lhs_ready_wos,
+                                lhs_ready_ws,
+                                lhs_ready_os,
+                                lhs_ready_wos,
     input   logic               lhs_start,
-                               lhs_ws,
-                               lhs_os,
+                                lhs_ws,
+                                lhs_os,
     input   logic [`dbLgN-1:0]  lhs_ptr [`N-1:0],
     input   logic [`lgN-1:0]    lhs_col [`N-1:0],
     input   data_t              lhs_data[`N-1:0],
@@ -414,62 +419,38 @@ module SpMM(
 );
     assign num_el = `N;
 
-    //Definations
-
     // Input Part
     data_t rhs_buffer [1:0][`N-1:0][`N-1:0]; // RHS buffer - stores full NxN matrix
-    logic [$clog2(`N/4)-1:0] rhs_block_counter; // Counter for blocks of 4 rows during RHS loading progress
+    logic [$clog2(`N>>2):0] rhs_block_counter; // Counter for blocks of 4 rows during RHS loading progress
     logic [1:0] rhs_buffer_counter;
     logic rhs_transfer_done; // Flag to indicate when RHS loading is done and transfered to processing buffer
     
-    // Output Part
-    logic [$clog2(`N/4)-1:0] output_counter; // Counter for blocks of 4 rows during output progress
-    data_t out_buffer [1:0][`N-1:0][`N-1:0]; // Output buffer
-    logic [1:0] out_buffer_counter;
-    
-    //Processing Part
-    logic [$clog2(`N):0] processing_counter; // Counter for processing time, deciding when to output
-    int pe_delay;
-    data_t pe_outputs [`N-1:0][`N-1:0]; // PE Output buffers
-
-
     typedef enum logic [1:0] {
         RHS_IDLE,
         RHS_LOAD,
         RHS_TRANSFER
     } rhs_state_t;
-
     rhs_state_t rhs_state, rhs_state_next;
 
-    // State register
-    always_ff @(posedge clock or posedge reset) begin
-        if (reset) begin
-            rhs_state         <= RHS_IDLE;
-            rhs_block_counter <= '0;
-            rhs_ready         <= 1'b0;
-            rhs_transfer_done <= 1'b0;
-        end
-        else rhs_state <= rhs_state_next;
-    end
-
-    // Next-state & output logic
+    // Next-state logic
     always_comb begin
-        // Default assignments
         rhs_state_next = rhs_state;
-        rhs_ready      = 1'b0;  
+        rhs_ready      = 0;
         case (rhs_state)
             RHS_IDLE: begin
-                rhs_state_next = RHS_LOAD;
-                rhs_ready = 1'b1;  // Ready to load data
+                rhs_ready      = 1;
+                if (rhs_start) rhs_state_next = RHS_LOAD;
             end
 
             RHS_LOAD: begin
-                rhs_ready = 0;  // We are in the midst of loading data
-                if (rhs_block_counter == (`N/4)) rhs_state_next = RHS_TRANSFER;
+                rhs_ready = 0;
+                if (rhs_block_counter == (`N>>2)) begin
+                    rhs_state_next = RHS_IDLE;
+                end
             end
 
             RHS_TRANSFER: begin
-                if (rhs_transfer_done) rhs_state_next = RHS_IDLE;
+                rhs_state_next = RHS_IDLE;
             end
         endcase
     end
@@ -477,80 +458,99 @@ module SpMM(
     // Data‐path for reading 4 rows at a time
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
-            rhs_block_counter <= '0;
-            rhs_buf_sel       <= 1'b0;
-            rhs_valid         <= 1'b0;
-        end
-        else begin
+            rhs_state           <= RHS_IDLE;
+            rhs_block_counter   <= 0;
+            rhs_buffer_counter  <= 0;
+            rhs_transfer_done   = 0;
+        end else begin
             case (rhs_state)
                 RHS_IDLE: begin
-                    rhs_block_counter <= 0;
-                    rhs_buffer_counter <= 0;
+                    rhs_block_counter   <= 0;
+                    rhs_transfer_done   = 0;
                 end
 
                 RHS_LOAD: begin
                     for (int i = 0; i < 4; i++)
                         for (int j = 0; j < `N; j++)
                             rhs_buffer[1][j][rhs_block_counter * 4 + i] <= rhs_data[i][j];
-
-                    rhs_block_counter <= rhs_block_counter + 1'b1;
-                    if (rhs_block_counter == (`N/4)) rhs_buffer_counter <= rhs_buffer_counter + 1'b1;
-                end
-
-                RHS_TRANSFER: begin
-                    if (!lhs_ws or rhs_buffer_counter < 2) begin
-                        for (int i = 0; i < `N; i++)
-                            for (int j = 0; j < `N; j++)
-                                rhs_buffer[0][i][j] <= rhs_buffer[1][i][j];
-                        rhs_transfer_done <= 1'b1;
-                        if (rhs_buffer_counter == 2) rhs_buffer_counter <= rhs_buffer_counter - 1;
+                    
+                    if (rhs_block_counter < (`N>>2)) rhs_block_counter <= rhs_block_counter + 1;
+                    else begin
+                        rhs_buffer_counter <= rhs_buffer_counter + 1;
+                        if (!rhs_buffer_counter) begin
+                            for (int i = 0; i < `N; i++)
+                                for (int j = 0; j < `N; j++)
+                                    rhs_buffer[0][i][j] <= rhs_buffer[1][i][j];
+                            for (int i = 0; i < `N; i++)
+                                for (int j = 0; j < `N; j++)
+                                    rhs_buffer[1][i][j] <= 0;
+                        end
                     end
                 end
             endcase
+            
+            rhs_state <= rhs_state_next;
         end
     end
 
+
+    //Processing Part
+    logic [$clog2(`N):0] processing_counter; // Counter for processing time, deciding when to output
+    int pe_delay;
+    data_t pe_outputs [`N-1:0][`N-1:0]; // PE Output buffers
+
+    typedef enum logic [1:0] {
+        LHS_IDLE,
+        LHS_PROCESS
+    } lhs_state_t;
+    lhs_state_t lhs_state, lhs_state_next;
+
+    assign lhs_ready_ws = lhs_ready_ns;
+    assign lhs_ready_os = lhs_ready_ws;
+    assign lhs_ready_wos = lhs_ready_os;
+    always_comb begin
+        lhs_state_next = lhs_state;
+        case (lhs_state)
+            LHS_IDLE: begin
+                if (lhs_start) lhs_state_next = LHS_PROCESS;
+                lhs_ready_ns = (rhs_buffer_counter > 0);
+            end
+
+            LHS_PROCESS: begin
+                lhs_ready_ns = 0;
+                if (processing_counter == (`N-1)) lhs_state_next = LHS_IDLE;
+            end
+        endcase
+    end
+
+    // Actual multiply logic + writing to out_buffer
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
-            lhs_valid = 0;
-            output_valid = 0;
-            rhs_block_counter = 0;
-            rhs_buffer_counter <= 0;
-            output_counter = 0;
-            out_buffer_counter = 0;
-            processing_counter = 0;
-        end
-    end
-    // RHS Buffer Loading Logic
-    logic rhs_valid;
-    always_ff @(posedge clock) begin
-        rhs_valid <= rhs_start || rhs_valid;
-        if (!rhs_valid) begin
-            rhs_block_counter = 0;
+            lhs_state           <= LHS_IDLE;
+            processing_counter  = 0;
         end else begin
-            // Load 4 rows at a time
-            for (int i = 0; i < 4; i++)
-                for (int j = 0; j < `N; j++)
-                    rhs_buffer[1][j][rhs_block_counter * 4 + i] <= rhs_data[i][j];
-            
-            rhs_block_counter++;
-            if (rhs_block_counter == (`N/4)) begin
-                rhs_valid <= 0;
-                rhs_buffer_counter <= rhs_buffer_counter + 1;
-                if (rhs_buffer_counter == 2 && lhs_ws) rhs_ready <= 0;
-                else rhs_ready <= 1;
-            end
-        end
-        if (rhs_ready) rhs_ready <= 0;
-    end
+            case (lhs_state)
+                LHS_IDLE: begin
+                    processing_counter = 0;
+                end
 
-    //If !ws, previous rhs_buffer[0] is discarded. rhs_buffer[1] is moved to rhs_buffer[0].
-    always_ff @(posedge rhs_ready) begin
-        if (!lhs_ws && rhs_buffer_counter > 0) begin
-            for (int i = 0; i < `N; i++)
-                for (int j = 0; j < `N; j++)
-                    rhs_buffer[0][i][j] <= rhs_buffer[1][i][j];
-            rhs_buffer_counter <= rhs_buffer_counter - 1;
+                LHS_PROCESS: begin
+                    // For each cycle, feed part of LHS and the selected RHS buffer into the PEs
+                    if (processing_counter == `N-1) begin
+                        if (!lhs_ws) begin
+                            for (int i = 0; i < `N; i++)
+                                for (int j = 0; j < `N; j++)
+                                    rhs_buffer[0][i][j] <= rhs_buffer[1][i][j];
+                            for (int i = 0; i < `N; i++)
+                                for (int j = 0; j < `N; j++)
+                                    rhs_buffer[1][i][j] <= 0;
+                            rhs_buffer_counter <= rhs_buffer_counter - 1;
+                        end
+                    end else processing_counter++;
+                end
+            endcase
+
+            lhs_state <= lhs_state_next;
         end
     end
 
@@ -573,62 +573,270 @@ module SpMM(
         end
     endgenerate
 
-    logic lhs_valid;
-    assign lhs_valid = lhs_start || lhs_valid;
-    always_ff @(posedge clock) begin
-        if (!lhs_valid) begin  
-            processing_counter = 0;
-        end else begin
-            if (processing_counter < (`N + pe_delay)) begin
-                for (int i = 0; i < `N; ++i)
-                    if (processing_counter >= pe_delay) begin
-                        if (lhs_os)
-                            out_buffer[1][processing_counter-pe_delay][i] += pe_outputs[i][processing_counter-pe_delay];
-                        else
-                            out_buffer[1][processing_counter-pe_delay][i] = pe_outputs[i][processing_counter-pe_delay];
-                    end
-                processing_counter++;
-            end else begin
-                lhs_valid = 0;
-                out_buffer_counter++;
-                if (out_buffer_counter == 1 && lhs_os) out_ready <= 0;
-                else out_ready <= 1;
+
+    // Output Part
+    logic [$clog2(`N>>2):0] output_block_counter; // Counter for blocks of 4 rows during output progress
+    data_t out_buffer [1:0][`N-1:0][`N-1:0]; // Output buffer
+    logic [$clog2(`N):0] output_receiving_counter;
+    logic output_stationary;
+    logic out_valid;
+
+    // Output buffer logic
+    typedef enum logic [1:0] {
+        OUT_IDLE,
+        OUT_RECEIVING
+    } out_state_t;
+    out_state_t out_state, out_state_next;
+
+    always_comb begin
+        out_state_next = out_state;
+        case (out_state)
+            OUT_IDLE: begin
+                if (processing_counter >= pe_delay-2) begin
+                    out_state_next = OUT_RECEIVING;
+                end
             end
-        end
+
+            OUT_RECEIVING: begin
+                if (output_receiving_counter == `N) begin
+                    if (processing_counter >= pe_delay-2) begin
+                        out_state_next = OUT_RECEIVING;
+                    end else out_state_next = OUT_IDLE;
+                end
+            end
+        endcase
     end
 
-    always_ff @(posedge out_ready) begin
-        //Deal with consecutive lhs_os. In this case, out_buffer[0] should stay stationary without moving to out_buffer[1].
-        if (!lhs_os) begin
-            for (int i = 0; i < `N; i++)
-                for (int j = 0; j < `N; j++)
-                    out_buffer[0][i][j] <= out_buffer[1][i][j];
-        end
-        out_buffer_counter--;
-    end
-
-
-    //Output Buffer Logic
-    logic output_valid;
-    assign output_valid = out_start || output_valid;
-    always_ff @(posedge clock or posedge reset or posedge out_ready) begin
-        if (!output_valid) begin
-            output_counter = 0;
+    // Sending out 4 rows at a time from the chosen out_buffer
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            out_state <= OUT_IDLE;
+            output_receiving_counter <= 0;
         end else begin
-            for (int block = 0; block < 4; block++)
-                for (int col = 0; col < `N; col++)
-                    out_data[block][col] <= out_buffer[1][block][col];
-            output_counter++;
-            if (output_counter == (`N/4)) begin
-                output_valid = 0;
+            case (out_state)
+                OUT_IDLE: begin
+                    output_receiving_counter <= 0;
+                end
+
+                OUT_RECEIVING: begin
+                    output_receiving_counter <= output_receiving_counter + 1;
+                    if (!output_receiving_counter) output_stationary <= lhs_os;
+                    for (int col = 0; col < `N; col++)
+                        out_buffer[1][output_receiving_counter][col] <= pe_outputs[col][output_receiving_counter];
+                    if (output_receiving_counter == `N) begin
+                        if (output_stationary) begin
+                            out_valid <= 0;
+                            for (int i = 0; i < `N; i++)
+                                for (int j = 0; j < `N; j++)
+                                    out_buffer[0][i][j] <= out_buffer[0][i][j] + out_buffer[1][i][j];
+                        end else begin
+                            out_valid <= 1;
+                            for (int i = 0; i < `N; i++)
+                                for (int j = 0; j < `N; j++)
+                                    out_buffer[0][i][j] <= out_buffer[1][i][j];
+                        end
+                        output_receiving_counter <= 0;
+                    end
+                end
+            endcase
+
+            out_state <= out_state_next;
+        end
+    end
+
+    always_ff @(posedge clock or posedge reset) begin
+        if (reset) begin
+            out_ready <= 0;
+            out_valid <= 0;
+            output_block_counter = 0;
+        end else begin
+            if (out_valid) begin
+                if (!output_block_counter) out_ready <= 1;
+                else out_ready <= 0;
+
+                for (int row = 0; row < 4; row++) begin
+                    for (int col = 0; col < `N; col++) begin
+                        out_data[row][col] = out_buffer[0][output_receiving_counter*4 + row][col];
+                    end
+                end
+                output_block_counter++;
+                if (output_block_counter == (`N>>2)) begin
+                    out_valid <= 0;
+                    output_block_counter = 0;
+                end
+            end else begin
                 out_ready <= 0;
             end
         end
     end
 
-    assign lhs_ready_wos = (lhs_ready_os & lhs_ready_ws);
-    assign lhs_ready_ns = (rhs_buffer_counter > 0);
-    assign lhs_ready_ws = lhs_ready_ns;
-    assign lhs_ready_os = lhs_ready_ns;
+    
 
 endmodule
+
+// module SpMM1(
+//     input   logic               clock,
+//                                reset,
+//     output  logic               lhs_ready_ns,
+//                                lhs_ready_ws,
+//                                lhs_ready_os,
+//                                lhs_ready_wos,
+//     input   logic               lhs_start,
+//                                lhs_ws,
+//                                lhs_os,
+//     input   logic [`dbLgN-1:0]  lhs_ptr [`N-1:0],
+//     input   logic [`lgN-1:0]    lhs_col [`N-1:0],
+//     input   data_t              lhs_data[`N-1:0],
+//     output  logic               rhs_ready,
+//     input   logic               rhs_start,
+//     input   data_t              rhs_data [3:0][`N-1:0],
+//     output  logic               out_ready,
+//     input   logic               out_start,
+//     output  data_t              out_data [3:0][`N-1:0],
+//     output  int                 num_el
+// );
+//     assign num_el = `N;
+
+//     //Definations
+
+//     // Input Part
+//     data_t rhs_buffer [`N-1:0][`N-1:0]; // RHS buffer - stores full NxN matrix
+//     logic [$clog2(`N/4)-1:0] rhs_block_counter; // Counter for blocks of 4 rows during RHS loading progress
+//     logic rhs_loading_done; // Signal for lhs loading
+    
+//     // Output Part
+//     logic [$clog2(`N/4)-1:0] output_counter; // Counter for blocks of 4 rows during output progress
+//     logic output_done; // Signal for output done
+//     data_t out_buffer [`N-1:0][`N-1:0]; // Output buffer
+    
+//     //Processing Part
+//     logic [$clog2(`N):0] processing_counter; // Counter for processing time, deciding when to output
+//     logic processing_done; // Signal for output ready
+//     int pe_delay;
+//     data_t pe_outputs [`N-1:0][`N-1:0]; // PE Output buffers
+
+    
+
+
+//     //State Machine
+//     typedef enum logic [1:0] {
+//         IDLE,
+//         LOADING_RHS,
+//         PROCESSING,
+//         OUTPUT
+//     } state_t;
+//     state_t current_state, next_state;
+
+//     always_ff @(posedge clock or posedge reset) begin
+//         if (reset) begin
+//             current_state <= IDLE;
+//             rhs_block_counter <= 0;
+//             rhs_loading_done <= 0;
+//             processing_counter <= 0;
+//             processing_done <= 0;
+//             out_ready = 0;
+//             output_counter <= 0;
+//         end else current_state <= next_state;
+//     end
+
+//     // Next state logic
+//     always_comb begin
+//         next_state = current_state;
+//         case (current_state)
+//             IDLE: begin
+//                 if (rhs_start)
+//                     next_state = LOADING_RHS;
+//             end
+//             LOADING_RHS: begin
+//                 if (rhs_loading_done)
+//                     next_state = PROCESSING;
+//             end
+//             PROCESSING: begin
+//                 if (processing_done)
+//                     next_state = OUTPUT;
+//             end
+//             OUTPUT: begin
+//                 out_ready = 1;
+//                 if (output_done)
+//                     next_state = IDLE;
+//             end
+//         endcase
+//     end
+
+
+//     // RHS Buffer Loading Logic
+//     always_ff @(posedge clock) begin
+//         if (current_state != LOADING_RHS) begin
+//             rhs_loading_done <= 0;
+//             rhs_block_counter <= 0;
+//         end else begin
+//             // Load 4 rows at a time
+//             for (int i = 0; i < 4; i++)
+//                 for (int j = 0; j < `N; j++)
+//                     rhs_buffer[j][rhs_block_counter * 4 + i] <= rhs_data[i][j];
+            
+//             // Update counter
+//             if (rhs_block_counter < (`N/4) - 1) rhs_block_counter <= rhs_block_counter + 1;
+//             else rhs_loading_done <= 1;
+//         end 
+//     end
+
+//     // PE array instantiation - N PEs, each processing one column
+//     genvar i;
+//     generate
+//         for (i = 0; i < `N; i++) begin : pe_array
+//             PE pe_inst (
+//                 .clock(clock),
+//                 .reset(reset),
+//                 .lhs_start(lhs_start && current_state == PROCESSING),
+//                 .lhs_ptr(lhs_ptr),
+//                 .lhs_col(lhs_col),
+//                 .lhs_data(lhs_data),
+//                 .rhs(rhs_buffer[i]),
+//                 .out(pe_outputs[i]),
+//                 .delay(pe_delay),
+//                 .num_el()
+//             );
+//         end
+//     endgenerate
+
+//     always_ff @(posedge clock) begin
+//         if (current_state != PROCESSING) begin  
+//             processing_counter <= 0;
+//             processing_done <= 0;
+//         end else begin
+//             if (processing_counter < (`N + pe_delay)) begin
+//                 processing_counter <= processing_counter + 1;
+//                 for (int i = 0; i < `N; ++i)
+//                     out_buffer[processing_counter-pe_delay][i] = pe_outputs[i][processing_counter-pe_delay];
+//             end else processing_done <= 1;
+//         end
+//     end
+
+
+//     //Output Buffer Logic
+//     always_ff @(posedge clock or posedge reset or posedge out_ready) begin
+//         if (current_state != OUTPUT) begin
+//             out_ready = 0;
+//             output_done <= 0;
+//             output_counter <= 0;
+//         end else begin
+//             for (int block = 0; block < 4; block++)
+//                 for (int col = 0; col < `N; col++)
+//                     assign out_data[block][col] = out_buffer[block][col];
+
+//             if (output_counter < (`N/4) - 1) output_counter <= output_counter + 1;
+//             else output_done <= 1;
+//         end
+//     end
+
+//     // Control signals
+//     assign rhs_ready = (current_state == IDLE);
+//     assign lhs_ready_ns = (current_state == PROCESSING);
+
+//     // Not implemented yet
+//     assign lhs_ready_ws = 0;
+//     assign lhs_ready_os = 0;
+//     assign lhs_ready_wos = 0;
+
+// endmodule

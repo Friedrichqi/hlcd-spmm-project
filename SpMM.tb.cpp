@@ -654,13 +654,13 @@ int main() {
         new NsOnepass(),
         new RhsDbBuf(),
         new OutDbBuf(),
-        //new RhsOutDbBuf(),
-        //new WSOnePass(),
-        // new WSOutDbBuf(),
-        // new WSPipe(),
-        // new OSOnePass(),
-        // new OSPipe(),
-        // new WOSOnePass(),
+        new RhsOutDbBuf(),
+        new WSOnePass(),
+        new WSOutDbBuf(),
+        new WSPipe(),
+        new OSOnePass(),
+        new OSPipe(),
+        new WOSOnePass(),
     };
     int idx = 0;
     int score = 0;
