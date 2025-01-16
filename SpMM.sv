@@ -91,6 +91,24 @@ module RedUnit(
     logic add_En[NUM_LEVELS:0][`N-1:0];
     logic bypass_En[NUM_LEVELS:0][`N-1:0];
     logic [NUM_LEVELS:0] left_sel[NUM_LEVELS:0][`N-1:0];
+    logic [NUM_LEVELS:0] vecid[`N-1:0];
+    generate
+        for(genvar i = 0; i < `N-1; i ++)
+            assign vecid[i] = vecID[0][i];
+    endgenerate
+    generate
+        for(genvar i = 0; i < `N-1; i ++)begin
+            wire addEn_probe;
+            assign addEn_probe = add_En[0][i];
+            wire bypassEn_probe;
+            assign bypassEn_probe = bypass_En[0][i];
+            wire [NUM_LEVELS:0] lsel;
+            assign lsel = left_sel[0][i];
+            wire [NUM_LEVELS:0] rsel;
+            assign rsel = right_sel[0][i];
+
+        end
+    endgenerate
     logic [NUM_LEVELS:0] right_sel[NUM_LEVELS:0][`N-1:0];
     //split_register 表示FAN network最后一行数据是否需要分裂
     logic split_register [NUM_LEVELS:0][`N-1:0];
@@ -112,7 +130,7 @@ module RedUnit(
                 zero_register[0][i] = 0;
             end
             out_scale_register[0][0] = 0;
-            out_scale_register[0][1] = 0;
+            out_scale_register[0][1] = `N-1;
         end else begin
             split_register[0] = split;
             out_idx_register[0] = out_idx;
@@ -160,6 +178,13 @@ module RedUnit(
     data_t fan_data[NUM_LEVELS:0][`N-1:0];
     //fan_register 表示FAN network中上一行处理完的数据（输出），作为下一行的输入
     data_t fan_register[NUM_LEVELS:0][`N-1:0];
+    data_t final_fan_register [`N-1:0];
+    generate
+        for (genvar i = 0  ; i < `N; i++ ) begin
+            assign final_fan_register[i] = fan_register[NUM_LEVELS-1][i];
+        end
+    endgenerate
+
     //fan_out_idx 表示这一行数据在FAN network结构中的的输出位置
     logic [NUM_LEVELS:0] fan_out_idx[NUM_LEVELS:0][`N-1:0];
     //fan_out_idx_register 表示FAN network中上一行处理完的数据的输出位置，在下一行处理完后，可能会更新到这一组数据中最深的累加器/register编号
@@ -184,7 +209,7 @@ module RedUnit(
                         zero_register[level+1][i] <= 0;
                     end
                     out_scale_register[level+1][0] <= 0;
-                    out_scale_register[level+1][1] <= 0;
+                    out_scale_register[level+1][1] <= `N-1;
                 end else begin
                     if (level == 0) begin
                         for (int i = 0; i < `N; i += step) begin
@@ -259,6 +284,7 @@ module RedUnit(
                                 end
                             if (flag && !split_register[level][`N-1]) begin
                                 halo_out = fan_register[level][fan_out_idx_register[level][vecID[level][`N-1]]];
+                                //halo_out = 0;
                             end else halo_out = 0;
                         end
                     end
@@ -308,7 +334,7 @@ module PE(
     // current_row_output 记录当前out_idx输出到哪一行了
     logic flag = 0;
     always_ff @(posedge clock or posedge reset) begin
-        if (reset) begin
+        if (reset || lhs_start) begin
             split = '{default: 0};
             current_pos_ptr = 0;
             current_row_data = 0;
@@ -333,14 +359,14 @@ module PE(
             if (current_row_output == 0) valid = 0 || lhs_start;
             current_row_data++;
         end else begin
-            split = '{default: 0};
-            current_pos_ptr = 0;
-            current_row_data = 0;
-            current_row_output = 0;
-            out_idx = '{default: 0};
-            time_counter <= 0;
-            out_scale[0] = 0;
-            out_scale[1] = 0;
+            // split = '{default: 0};
+            // current_pos_ptr = 0;
+            // current_row_data = 0;
+            // current_row_output = 0;
+            // out_idx = '{default: 0};
+            // time_counter <= 0;
+            // out_scale[0] = 0;
+            // out_scale[1] = 0;
         end
     end
 
@@ -612,6 +638,17 @@ module SpMM(
         endcase
     end
 
+
+    
+    generate
+        for (genvar i = 0; i < `N; ++i) begin
+            data_t t_out[`N-1:0];
+            data_t t_out_buffer[`N-1:0];
+            for (genvar j = 0; j < `N; ++j) assign t_out[j] = pe_outputs[j][i];
+            for (genvar j = 0; j < `N; ++j) assign t_out_buffer[j] = out_buffer[1][i][j];
+        end
+    endgenerate
+
     // Sending out 4 rows at a time from the chosen out_buffer
     always_ff @(posedge clock or posedge reset) begin
         if (reset) begin
@@ -634,6 +671,10 @@ module SpMM(
                             out_buffer[1][row][col] <= pe_outputs[col][row];
                     if (output_receiving_counter == `N) begin
                         output_buffer_counter++;
+                        // out_valid <= (!output_stationary);
+                        // for (int i = 0; i < `N; i++)
+                        //     for (int j = 0; j < `N; j++)
+                        //         out_buffer[0][i][j] <= out_buffer[1][i][j];
                         if (!output_stationary || output_buffer_counter == 1) begin
                             out_valid <= (!output_stationary);
                             for (int i = 0; i < `N; i++)
@@ -682,6 +723,14 @@ module SpMM(
         end
     end
 
-    
+    generate
+        for(genvar i = 0; i < `N; i++) begin
+            data_t out_dta[`N-1:0];
+            for(genvar j = 0; j < `N; j++) begin
+                assign out_dta[j] = out_buffer[0][i][j];
+            end
+        end
+
+    endgenerate
 
 endmodule
